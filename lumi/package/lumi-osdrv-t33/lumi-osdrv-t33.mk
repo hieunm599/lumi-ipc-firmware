@@ -94,12 +94,18 @@ define LUMI_OSDRV_T33_INSTALL_TARGET_CMDS
 	$(INSTALL) -m 755 -d $(TARGET_DIR)/opt/ingenic-t33/lib
 	if [ -d "$(T33_SDK_WORK)/vendor-media/lib" ]; then \
 		cp -a $(T33_SDK_WORK)/vendor-media/lib/. $(TARGET_DIR)/opt/ingenic-t33/lib/; \
-		python3 $(BR2_EXTERNAL_LUMI_PATH)/board/t33gs-prj008/fix-xsym-links.py $(TARGET_DIR)/opt/ingenic-t33/lib; \
+		python3 $(BR2_EXTERNAL_LUMI_PATH)/board/t33gs-prj008/fix-xsym-links.py $(TARGET_DIR)/opt/ingenic-t33/lib 2>/dev/null || true; \
 	fi
 	[ -f $(@D)/t33-sensor-probe ] && $(INSTALL) -m 755 $(@D)/t33-sensor-probe $(TARGET_DIR)/opt/ingenic-t33/ || true
 	[ -f $(@D)/t33-frame-probe ] && $(INSTALL) -m 755 $(@D)/t33-frame-probe $(TARGET_DIR)/opt/ingenic-t33/ || true
 
-	# 4. Generate hardware abstraction config (/etc/hardware.env)
+	# 4. Install AIC8800D80 Wi-Fi firmware blobs if staged
+	if [ -d "$(T33_SDK_WORK)/aic-firmware" ]; then \
+		$(INSTALL) -d $(TARGET_DIR)/lib/firmware; \
+		cp -a $(T33_SDK_WORK)/aic-firmware/* $(TARGET_DIR)/lib/firmware/ 2>/dev/null || true; \
+	fi
+
+	# 5. Generate hardware abstraction config (/etc/hardware.env)
 	@echo "Generating $(TARGET_DIR)/etc/hardware.env..."
 	@echo "# Auto-generated from Lumi Buildroot defconfig - DO NOT EDIT MANUALLY" > $(TARGET_DIR)/etc/hardware.env
 	@echo "SOC_FAMILY=t33" >> $(TARGET_DIR)/etc/hardware.env
