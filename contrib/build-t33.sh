@@ -14,9 +14,10 @@ T33_MEM_ARGS=${T33_MEM_ARGS:-'mem=96M@0x0 rmem=32M@0x6000000'}
 SDK_WORK="$OUTPUT/t33-sdk"
 KERNEL_SOURCE="$SDK_WORK/kernel-3.10.14"
 TOOLCHAIN_ROOT="$SDK_WORK/toolchain/mips-gcc540-uclibc0.9.33.2-r3.3.7.mxu2.cve2"
-PATCH_FILE="$REPO_ROOT/lumi-ipc-linux/kernel/ingenic/patches/0001-prj008-report-mxuv2-on-t33.patch"
-MSC0_PATCH_FILE="$REPO_ROOT/lumi-ipc-linux/kernel/ingenic/patches/0002-prj008-enable-msc0-pb-pinmux.patch"
-MMC_PWR_PATCH_FILE="$REPO_ROOT/lumi-ipc-linux/kernel/ingenic/patches/0003-prj008-goat-enable-mmc-power-pb27.patch"
+PATCH_DIR="$FW_ROOT/lumi/board/t33gs-prj008/patches/linux"
+PATCH_FILE="$PATCH_DIR/0001-prj008-report-mxuv2-on-t33.patch"
+MSC0_PATCH_FILE="$PATCH_DIR/0002-prj008-enable-msc0-pb-pinmux.patch"
+MMC_PWR_PATCH_FILE="$PATCH_DIR/0003-prj008-goat-enable-mmc-power-pb27.patch"
 UBOOT_SOURCE="$SDK_WORK/uboot/uboot"
 UBOOT_HOST_PATCH="$REPO_ROOT/lumi-ipc-firmware/lumi/board/t33gs-prj008/uboot-host-tools.patch"
 

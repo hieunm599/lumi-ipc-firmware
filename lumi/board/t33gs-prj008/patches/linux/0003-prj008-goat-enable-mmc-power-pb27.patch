@@ -1,0 +1,11 @@
+--- a/arch/mips/xburst/soc-PRJ008/chip-PRJ008/isvp/Goat/board.h
++++ b/arch/mips/xburst/soc-PRJ008/chip-PRJ008/isvp/Goat/board.h
+@@ -34,7 +34,7 @@
+ #define GPIO_MMC_RST_N_LEVEL	LOW_ENABLE
+ #define GPIO_MMC_CD_N			GPIO_PB(28)
+ #define GPIO_MMC_CD_N_LEVEL		LOW_ENABLE
+-#define GPIO_MMC_PWR			-1  //GPIO_PB(27)
++#define GPIO_MMC_PWR			GPIO_PB(27)
+ #define GPIO_MMC_PWR_LEVEL		LOW_ENABLE
+ #define GPIO_MMC_VOLTAGE		GPIO_PA(17)
+ #define GPIO_MMC_VOLTAGE_LEVEL	HIGH_ENABLE

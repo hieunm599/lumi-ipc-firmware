@@ -1,0 +1,11 @@
+--- a/arch/mips/xburst/soc-PRJ008/common/platform.c
++++ b/arch/mips/xburst/soc-PRJ008/common/platform.c
+@@ -33,7 +33,8 @@
+ struct jz_gpio_func_def platform_devio_array[] = {
+-#if 0
+ #ifdef CONFIG_MMC_SDHCI_MMC0_PB_4BIT
++	/* T33 SD/MMC0: PB0-PB5 use MSC0 function 0. */
+ 	MSC0_PORTB,
+ #endif
++#if 0 /* Keep unused MSC1 routes disabled. */
+ #ifdef CONFIG_MMC_SDHCI_MMC1_PA_4BIT

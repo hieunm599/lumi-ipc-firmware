@@ -1,0 +1,11 @@
+--- a/arch/mips/kernel/cpu-probe.c
++++ b/arch/mips/kernel/cpu-probe.c
+@@ -1018,7 +1018,7 @@
+ 	}
+ }
+ 
+-extern int soc_support_mxuv2(void);
++static inline int soc_support_mxuv2(void) { return 1; }
+ 
+ static inline void cpu_probe_ingenic(struct cpuinfo_mips *c, unsigned int cpu)
+ {
