@@ -18,16 +18,21 @@ PATCH_FILE="$REPO_ROOT/lumi-ipc-linux/kernel/ingenic/patches/0001-prj008-report-
 MSC0_PATCH_FILE="$REPO_ROOT/lumi-ipc-linux/kernel/ingenic/patches/0002-prj008-enable-msc0-pb-pinmux.patch"
 MMC_PWR_PATCH_FILE="$REPO_ROOT/lumi-ipc-linux/kernel/ingenic/patches/0003-prj008-goat-enable-mmc-power-pb27.patch"
 UBOOT_SOURCE="$SDK_WORK/uboot/uboot"
-UBOOT_HOST_PATCH="$REPO_ROOT/lumi-ipc-firmware/br-ext-chip-ingenic/board/t33/uboot-host-tools.patch"
+UBOOT_HOST_PATCH="$REPO_ROOT/lumi-ipc-firmware/lumi/board/t33gs-prj008/uboot-host-tools.patch"
 
+LUMI_UBOOT_REPO="$REPO_ROOT/lumi-u-boot-t33"
 KERNEL_ARCHIVE=$(find "$T33_SDK_ROOT" -type f -path '*/opensource/kernel-3.10.14.7z' -print -quit)
 TOOLCHAIN_ARCHIVE=$(find "$T33_SDK_ROOT" -type f -path '*/software/pc/toolchain/mips-gcc540-uclibc0.9.33.2-r3.3.7.mxu2.cve2.tar.bz2' -print -quit)
 UBOOT_ARCHIVE=$(find "$T33_SDK_ROOT" -type f -path '*/opensource/uboot.7z' -print -quit)
 DRIVER_ARCHIVE=$(find "$T33_SDK_ROOT" -type f -path '*/opensource/drivers.7z' -print -quit)
 IMP_DIR=$(find "$T33_SDK_ROOT" -type f -path '*/media/en/lib/uclibc/libimp.so' -printf '%h\n' -quit)
 UCLIBC_RUNTIME=$(find "$T33_SDK_ROOT" -type f -path '*/resource/rootfs/zeratul/5.4.0/uclibc/rootfs_camera/lib/ld-uClibc.so.0' -printf '%h\n' -quit)
-if [[ -z "$KERNEL_ARCHIVE" || -z "$TOOLCHAIN_ARCHIVE" || -z "$UBOOT_ARCHIVE" || -z "$DRIVER_ARCHIVE" || -z "$IMP_DIR" || -z "$UCLIBC_RUNTIME" ]]; then
-	echo "T33 SDK is missing its kernel, U-Boot, toolchain, drivers, libimp, or uClibc runtime" >&2
+if [[ -z "$KERNEL_ARCHIVE" || -z "$TOOLCHAIN_ARCHIVE" || -z "$DRIVER_ARCHIVE" || -z "$IMP_DIR" || -z "$UCLIBC_RUNTIME" ]]; then
+	echo "T33 SDK is missing its kernel, toolchain, drivers, libimp, or uClibc runtime" >&2
+	exit 1
+fi
+if [[ ! -d "$LUMI_UBOOT_REPO" && -z "$UBOOT_ARCHIVE" ]]; then
+	echo "T33 U-Boot repository not found and SDK opensource/uboot.7z is missing" >&2
 	exit 1
 fi
 command -v 7z >/dev/null || { echo "Install 7zip to extract the vendor kernel archive" >&2; exit 1; }
@@ -49,7 +54,7 @@ if [[ ! -x "$TOOLCHAIN_ROOT/bin/mips-linux-uclibc-gcc" ]]; then
 	tar -xjf "$TOOLCHAIN_ARCHIVE" -C "$SDK_WORK/toolchain"
 fi
 
-if [[ ! -f "$UBOOT_SOURCE/Makefile" ]]; then
+if [[ ! -d "$LUMI_UBOOT_REPO" && ! -f "$UBOOT_SOURCE/Makefile" ]]; then
 	mkdir -p "$SDK_WORK/uboot"
 	7z x -y "-o$SDK_WORK/uboot" "$UBOOT_ARCHIVE" >/dev/null
 	[[ -f "$UBOOT_SOURCE/Makefile" ]] || {
@@ -183,7 +188,7 @@ LINUX_OVERRIDE_SRCDIR = $KERNEL_SOURCE
 override LINUX_MAKE_FLAGS += CROSS_COMPILE=$TOOLCHAIN_ROOT/bin/mips-linux-uclibc-
 EOF
 
-(cd "$FW_ROOT" && make BOARD=t33_lite TARGET="$OUTPUT" BR2_DL_DIR="$DL_DIR" br-all)
+(cd "$FW_ROOT" && make BOARD=lumi_t33gs_prj008_nor16 TARGET="$OUTPUT" BR2_DL_DIR="$DL_DIR" br-all)
 
 BOOT_DIR="$OUTPUT/tftp/openipc-t33"
 mkdir -p "$BOOT_DIR"
@@ -204,30 +209,36 @@ tftp 0x83000000 openipc-t33/openipc-t33-initramfs.uImage
 bootm 0x80600000 0x83000000
 EOF
 
-# Build Ingenic's T33N SPI-NOR SPL + U-Boot candidate. Its bootargs use an
-# adjusted 16 MiB layout with 4 MiB root for the local-only media runtime.
-# OpenIPC's flash-root init is /init and expects a writable rootfs_data MTD
-# partition for its overlay. The SDK camera defaults use /linuxrc and appfs.
-sed -i -e 's/init=\/linuxrc/init=\/init/g' \
-	-e 's/-(appfs)/-(rootfs_data)/g' \
-	-e 's/2560k(kernel),2048k(root)/2560k(kernel),4096k(root)/g' \
-	-e 's/4096k(root),-(rootfs_data)/4096k(root),9440k(rootfs_data),32k(env)/g' \
-	-e 's/4096k(root),64k(dtb),-(rootfs_data)/4096k(root),64k(dtb),9376k(rootfs_data),32k(env)/g' \
-	"$UBOOT_SOURCE/include/configs/PRJ.h"
-# The SDK defaults put ENV immediately after the U-Boot image, inside an
-# erase block shared with boot code. Reserve the final NOR erase block instead.
-sed -i '/#elif CONFIG_ENV_IS_IN_SPI_FLASH/,/#endif \/\* endif CONFIG_ENV_IS_IN_MMC \*\// {
- s/^#define CONFIG_ENV_SECT_SIZE.*/#define CONFIG_ENV_SECT_SIZE    (1024 * 32)/
- s/^#define CONFIG_ENV_OFFSET.*/#define CONFIG_ENV_OFFSET       0xff8000/
-}' \
-	"$UBOOT_SOURCE/include/configs/PRJ.h"
-UBOOT_CROSS_COMPILE="$TOOLCHAIN_ROOT/bin/mips-linux-uclibc-"
-make -s -C "$UBOOT_SOURCE" CROSS_COMPILE="$UBOOT_CROSS_COMPILE" distclean
-make -s -C "$UBOOT_SOURCE" CROSS_COMPILE="$UBOOT_CROSS_COMPILE" PRJ008_n_sfcnor_config
-make -s -C "$UBOOT_SOURCE" -j"$(nproc)" CROSS_COMPILE="$UBOOT_CROSS_COMPILE" u-boot-with-spl.bin
+if [[ -d "$LUMI_UBOOT_REPO" ]]; then
+	echo "Building T33 U-Boot from lumi-u-boot-t33 repository..."
+	(cd "$LUMI_UBOOT_REPO" && CROSS_COMPILE="$TOOLCHAIN_ROOT/bin/mips-linux-uclibc-" ./build.sh PRJ008_n_sfcnor_config)
+	UBOOT_BIN="$LUMI_UBOOT_REPO/output/u-boot-with-spl.bin"
+else
+	# Build Ingenic's T33N SPI-NOR SPL + U-Boot candidate. Its bootargs use an
+	# adjusted 16 MiB layout with 4 MiB root for the local-only media runtime.
+	# OpenIPC's flash-root init is /init and expects a writable rootfs_data MTD
+	# partition for its overlay. The SDK camera defaults use /linuxrc and appfs.
+	sed -i -e 's/init=\/linuxrc/init=\/init/g' \
+		-e 's/-(appfs)/-(rootfs_data)/g' \
+		-e 's/2560k(kernel),2048k(root)/2560k(kernel),4096k(root)/g' \
+		-e 's/4096k(root),-(rootfs_data)/4096k(root),9440k(rootfs_data),32k(env)/g' \
+		-e 's/4096k(root),64k(dtb),-(rootfs_data)/4096k(root),64k(dtb),9376k(rootfs_data),32k(env)/g' \
+		"$UBOOT_SOURCE/include/configs/PRJ.h"
+	# The SDK defaults put ENV immediately after the U-Boot image, inside an
+	# erase block shared with boot code. Reserve the final NOR erase block instead.
+	sed -i '/#elif CONFIG_ENV_IS_IN_SPI_FLASH/,/#endif \/\* endif CONFIG_ENV_IS_IN_MMC \*\// {
+	 s/^#define CONFIG_ENV_SECT_SIZE.*/#define CONFIG_ENV_SECT_SIZE    (1024 * 32)/
+	 s/^#define CONFIG_ENV_OFFSET.*/#define CONFIG_ENV_OFFSET       0xff8000/
+	}' \
+		"$UBOOT_SOURCE/include/configs/PRJ.h"
+	UBOOT_CROSS_COMPILE="$TOOLCHAIN_ROOT/bin/mips-linux-uclibc-"
+	make -s -C "$UBOOT_SOURCE" CROSS_COMPILE="$UBOOT_CROSS_COMPILE" distclean
+	make -s -C "$UBOOT_SOURCE" CROSS_COMPILE="$UBOOT_CROSS_COMPILE" PRJ008_n_sfcnor_config
+	make -s -C "$UBOOT_SOURCE" -j"$(nproc)" CROSS_COMPILE="$UBOOT_CROSS_COMPILE" u-boot-with-spl.bin
+	UBOOT_BIN="$UBOOT_SOURCE/u-boot-with-spl.bin"
+fi
 
 NOR_IMAGE="$OUTPUT/images/openipc-t33-prj008n-nor-16m.bin"
-UBOOT_BIN="$UBOOT_SOURCE/u-boot-with-spl.bin"
 KERNEL_BIN="$OUTPUT/images/uImage"
 ROOTFS_BIN="$OUTPUT/images/rootfs.squashfs"
 UBOOT_PART_SIZE=$((256 * 1024))

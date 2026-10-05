@@ -122,7 +122,6 @@ ALL_BOARDS = [
 # named in UNBUILT_FAMILIES, or named here with a reason. Silence is no longer
 # an option, which is the actual fix --- the list below is just today's answer.
 UNBUILT_BOARDS = {
-    "t33_lite": "requires the local Ingenic T32/T33 SDK, which is not distributed to CI",
     # Firmware-identical to a board that IS built, and served from it via
     # BR2_OPENIPC_SOC_ALIASES (manifest @alias). Building them would ship two
     # bit-identical images under different names. These two were already
