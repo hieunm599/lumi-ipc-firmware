@@ -89,7 +89,7 @@ not retained. This work does not flash or reboot the attached camera.
 the user's board. Do not treat it as a validated working firmware. See the
 SPI diagnostic revision at the end of this document.
 
-Login remains `root` / `lumivn274`, shared salted SHA-512-crypt hash. UART is
+Login remains `root` / `LumiVn@2026`, shared salted SHA-512-crypt hash. UART is
 required for first bring-up: **no SSID/password is embedded**, and there is no
 Ethernet fallback. S35board enables Wi-Fi GPIO62, loads the Wi-Fi stack and waits
 up to 10 seconds for wlan0. S40network only calls `ifup wlan0` when `wlanssid`

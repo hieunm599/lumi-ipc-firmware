@@ -100,7 +100,7 @@ Sensor, Wi-Fi và khả năng boot vẫn cần kiểm tra trên board T23N thự
 
 ## Bản fixed login cho bring-up
 
-Overlay chung Lumi đặt tài khoản **root / lumivn274** cho mọi dòng chip,
+Overlay chung Lumi đặt tài khoản **root / LumiVn@2026** cho mọi dòng chip,
 áp dụng cả console và SSH.
 Không tự động đăng nhập, không bắt đổi mật khẩu lần đầu; vẫn có thể dùng `passwd`
 để đổi về sau. Đây là mật khẩu dùng chung theo yêu cầu, **không phải cải thiện
