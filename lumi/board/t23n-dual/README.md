@@ -1,6 +1,6 @@
 # Lumi T23N dual OS02N10 / AIC8800DC
 
-Local board preset: `t23n_dual_lumi`. Firmware remains OpenIPC/Buildroot; only
+Board preset: `lumi_t23n_dual_nor16` (`lumi/configs/`). Firmware remains OpenIPC/Buildroot; only
 the matching sensor/ISP and Wi-Fi driver sources are taken from the SDKs below.
 No Majestic, streaming daemon, old `libimp`, generic `sinfo` or `load_ingenic`.
 The replacement application must use userspace libraries matching the dual ISP
@@ -53,21 +53,21 @@ From the firmware repository, with `lumi-ipc-builder:openipc-t23` already built:
 docker run --rm --user "$(id -u):$(id -g)" --cpuset-cpus 0-7 \
   --env PWD=/work --mount "type=bind,source=$(pwd),target=/work" --workdir /work \
   lumi-ipc-builder:openipc-t23 \
-  make BOARD=t23n_dual_lumi TARGET=/work/output/t23n-dual-nor16 \
+  make BOARD=lumi_t23n_dual_nor16 TARGET=/work/output/lumi-t23n-dual-nor16 \
     BR2_DL_DIR=/work/output/t23-nor8/dl BR2_CCACHE_DIR=/work/output/t23-nor8/ccache
 
 python3 contrib/pack-t23n-nor8.py --flash-mib 16 \
   --uboot ../lumi-u-boot-ingenic/output/u-boot-t23n-nor.bin \
-  --kernel output/t23n-dual-nor16/images/uImage.t23 \
-  --rootfs output/t23n-dual-nor16/images/rootfs.squashfs.t23 \
-  --output output/t23n-dual-nor16/images/lumi-t23n-dual-os02n10-aic8800dc-nor16-full.bin
+  --kernel output/lumi-t23n-dual-nor16/images/uImage.t23 \
+  --rootfs output/lumi-t23n-dual-nor16/images/rootfs.squashfs.t23 \
+  --output output/lumi-t23n-dual-nor16/images/lumi-t23n-dual-os02n10-aic8800dc-nor16-full.bin
 ```
 
 The packer retains its historical filename but supports both 8 and 16 MiB.
 It refuses overwrites; choose a fresh output name when rebuilding. Firmware
 output is isolated from `t23-nor8`; only source downloads and ccache are shared.
-This board is intentionally excluded from upstream release CI, but registered
-in its coverage audit. All physical-board changes live in this board directory.
+This board is not part of upstream release CI (the CI matrix only scans
+`br-ext-chip-*`). All physical-board changes live in this board directory.
 
 ## Flash and boot
 

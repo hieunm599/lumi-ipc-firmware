@@ -1,5 +1,8 @@
 BR_VER = 2024.02.10
-BR_MAKE = $(MAKE) -C $(TARGET)/buildroot-$(BR_VER) BR2_EXTERNAL=$(PWD)/general O=$(TARGET)
+# Lumi boards (lumi/configs) load a second external tree. Upstream defconfigs
+# use the single-tree form $(BR2_EXTERNAL)/..., so they keep GENERAL alone.
+BR_EXTERNALS = $(PWD)/general$(if $(filter lumi/%,$(CONFIG)),:$(PWD)/lumi)
+BR_MAKE = $(MAKE) -C $(TARGET)/buildroot-$(BR_VER) BR2_EXTERNAL=$(BR_EXTERNALS) O=$(TARGET)
 BR_LINK = https://github.com/buildroot/buildroot/archive
 BR_FILE = /tmp/buildroot-$(BR_VER).tar.gz
 BR_CONF = $(TARGET)/openipc_defconfig
@@ -26,14 +29,15 @@ CONFIG = $(error variable BOARD not defined)
 TIMER := $(shell date +%s)
 
 ifeq ($(or $(MAKECMDGOALS), $(BOARD)),)
-LIST := $(shell find ./br-ext-*/configs/*_defconfig | sort | \
-	sed -E "s/br-ext-chip-(.+).configs.(.+)_defconfig/'\2' '\1 \2'/")
+LIST := $(shell find ./lumi/configs/*_defconfig ./br-ext-*/configs/*_defconfig 2>/dev/null | sort | \
+	sed -E -e "s/br-ext-chip-(.+).configs.(.+)_defconfig/'\2' '\1 \2'/" \
+	-e "s/.\/lumi.configs.(.+)_defconfig/'\1' 'lumi \1'/")
 BOARD := $(or $(shell whiptail --title "Available boards" --menu "Select a config:" 20 70 12 \
 	--notags $(LIST) 3>&1 1>&2 2>&3),$(CONFIG))
 endif
 
 ifneq ($(BOARD),)
-CONFIG := $(shell find br-ext-*/configs/*_defconfig | grep -m1 $(BOARD))
+CONFIG := $(shell find lumi/configs/*_defconfig br-ext-*/configs/*_defconfig 2>/dev/null | grep -m1 $(BOARD))
 include $(CONFIG)
 endif
 
@@ -106,10 +110,10 @@ help:
 	- make br-linux - build linux kernel only\n\n"
 
 list:
-	@ls -1 br-ext-chip-*/configs
+	@ls -1 lumi/configs br-ext-chip-*/configs
 
 package:
-	@find $(PWD)/general/package/* -maxdepth 0 -type d -printf "br-%f\n" | grep -v patch
+	@find $(PWD)/lumi/package/* $(PWD)/general/package/* -maxdepth 0 -type d -printf "br-%f\n" 2>/dev/null | grep -v patch
 
 toolname:
 	@echo toolchain.$(BR2_OPENIPC_SOC_VENDOR)-$(BR2_OPENIPC_SOC_FAMILY)

@@ -7,7 +7,7 @@ export OPENIPC_VARIANT := $(call qstrip,$(BR2_OPENIPC_VARIANT))
 export OPENIPC_MAJESTIC := $(call qstrip,$(BR2_OPENIPC_MAJESTIC))
 export WGET := wget --show-progress --passive-ftp -nd -t5 -T10
 
-EXTERNAL_VENDOR := $(BR2_EXTERNAL)/../br-ext-chip-$(OPENIPC_SOC_VENDOR)
+EXTERNAL_VENDOR := $(BR2_EXTERNAL_GENERAL_PATH)/../br-ext-chip-$(OPENIPC_SOC_VENDOR)
 OPENIPC_KERNEL := $(OPENIPC_SOC_VENDOR)-$(OPENIPC_SOC_FAMILY)
 OPENIPC_TOOLCHAIN := toolchain/toolchain.$(OPENIPC_KERNEL)
 
@@ -28,5 +28,5 @@ OPENIPC_TOOLCHAIN := toolchain/toolchain.$(OPENIPC_KERNEL)
 # by ~45KB in the size report rather than anything failing.
 WPA_SUPPLICANT_CONFIG_DISABLE += CONFIG_TDLS CONFIG_IEEE80211R
 
-include $(sort $(wildcard $(BR2_EXTERNAL)/package/*/*.mk))
-include $(sort $(wildcard $(BR2_EXTERNAL)/package/legacy/*/*.mk))
+include $(sort $(wildcard $(BR2_EXTERNAL_GENERAL_PATH)/package/*/*.mk))
+include $(sort $(wildcard $(BR2_EXTERNAL_GENERAL_PATH)/package/legacy/*/*.mk))

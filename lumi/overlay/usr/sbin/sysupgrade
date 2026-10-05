@@ -1,0 +1,1450 @@
+#!/bin/sh
+# OpenIPC.org | 2025
+scr_version=1.0.63
+
+args="$@"
+LOCK_FILE=/tmp/sysupgrade.lock
+# Cross-repo contract with majestic. While this exists, majestic is in charge of
+# putting itself back after a failed upgrade and must not be restarted from
+# underneath -- see restore_resources. Written by its enter_upgrade_mode and
+# removed by leave_upgrade_mode; the other side is src/main.c in majestic.
+MAJESTIC_OWNER=/tmp/majestic-upgrade-owner
+# Where the flash phase is moved to before it starts writing. Deliberately not
+# under /tmp: /tmp is moved into it, and a mount cannot be relocated under
+# itself. See enter_ramfs.
+RAM_ROOT=${RAM_ROOT:-/ram}
+# Absolute, always. Two things downstream assume it: /proc/mounts records mount
+# points absolutely, so the "is this tmpfs ours" check would never match a
+# relative path; and the second phase reaches this same directory through the
+# old root as "/mnt$RAM_ROOT", which a missing leading slash turns into
+# "/mntram". Both would fail quietly, so normalise an override rather than
+# trusting whoever set it.
+case "$RAM_ROOT" in /*) ;; *) RAM_ROOT="/$RAM_ROOT" ;; esac
+# A writable descriptor on the real /dev/null, opened once while /dev is still
+# certainly the devtmpfs.
+#
+# enter_ramfs moves /dev out of the old root and then keeps running there for a
+# few more commands. A shell redirection CREATES its target, so a plain
+# `2>/dev/null` in that window discards nothing — it writes a regular file named
+# `null` into the old root's now-empty /dev. That root is an overlay, so the file
+# lands in the upper layer and outlives the upgrade: cameras came back from a
+# perfectly good flash carrying a 0600 /overlay/root/dev/null which shadows the
+# character device on every boot until /init moves devtmpfs back over it
+# (OpenIPC/majestic-webui#120). Reported on four SoCs at once, and absent from
+# every camera old enough to predate the ramfs pivot.
+#
+# A descriptor names the inode, not the path, so it keeps working across the
+# mount move, the pivot and the exec. Guarded and given a fallback because `exec`
+# is a special builtin: a redirection it cannot satisfy takes the script down.
+if [ -c /dev/null ]; then exec 3>/dev/null; else exec 3>&2; fi
+# Seconds the rootfs verify-mount may take before it is treated as unmountable.
+mount_wait=${mount_wait:-45}
+# Seconds the operator gets to Ctrl-C out of a run that will force a reboot.
+abort_wait=${abort_wait:-5}
+# Route to firmware or builder manifest. A stock OpenIPC/firmware build
+# stamps BUILD_PLATFORM=${soc}_${variant} with variant in {lite,ultimate,
+# neo}. Anything else — a per-device override (${soc}_${variant}_${device},
+# two or more underscores) or a non-stock variant (${soc}_fpv etc.) — is
+# built by OpenIPC/builder. Pre-1.0.51 cameras lack BUILD_PLATFORM; fall
+# back to BUILD_OPTION (variant) alone.
+_plat=$(grep '^BUILD_PLATFORM=' /etc/os-release 2>/dev/null | cut -d= -f2)
+case "$_plat" in
+	*_*_*)                            _manifest_repo=builder  ;;
+	*_lite|*_ultimate|*_neo)          _manifest_repo=firmware ;;
+	?*)                               _manifest_repo=builder  ;;
+	*)
+		_osr=$(grep '^BUILD_OPTION=' /etc/os-release 2>/dev/null | cut -d= -f2)
+		case "${_osr:-lite}" in
+			lite|ultimate|neo) _manifest_repo=firmware ;;
+			*)                 _manifest_repo=builder  ;;
+		esac
+		;;
+esac
+MANIFEST_URL=${MANIFEST_URL:-${LUMI_MANIFEST_URL:-}}
+MANIFEST_CACHE=/tmp/manifest.flat
+unset _osr _plat _manifest_repo
+# Every online fetch verifies the server's certificate against the bundle the
+# image ships at /etc/ssl/certs/ca-certificates.crt (libcurl's built-in default
+# here). --insecure puts -k back for one run, for a private mirror with a
+# self-signed certificate; nothing else ever sets it. GHSA-fjf7-9x3v-6mj6.
+curl_insecure=
+
+echo_c() {
+	# 31 red, 32 green, 33 yellow, 34 blue, 35 magenta, 36 cyan, 37 white, 38 grey
+	[ -z "$HASERLVER" ] && t="\e[1;$1m$2\e[0m" || t="$2"
+	echo -e "$t"
+}
+
+die() {
+	echo_c 31 "$1 Aborting."
+	# Only reboot once flash has actually been touched. Past that point the
+	# partition is already erased and rebooting into whatever landed is the
+	# least-bad option; before it, nothing on the camera has changed, so a reboot
+	# fixes nothing and costs plenty:
+	#
+	#   - it destroys /tmp, and with it the log that says what went wrong;
+	#   - to anything watching the camera come back it is indistinguishable from
+	#     a successful upgrade. The WebUI drives this over /ws/upgrade and had no
+	#     other signal, so a download that timed out was reported to the user as
+	#     an update that worked (majestic-webui issue #120).
+	#
+	# The caller sees a non-zero exit either way; what changes is that a failure
+	# before the first write now leaves the camera exactly as it found it.
+	#
+	# _ramfs_phase is the other way in. Once enter_ramfs has pivoted there is no
+	# sane system left to hand back — the services, /etc and the rootfs an
+	# operator would return to are all behind /mnt — so a failure there reboots
+	# whatever it was doing, written or not.
+	if [ "1" = "$flash_touched" ] || [ "1" = "$_ramfs_phase" ]; then
+		reboot_system
+	else
+		# Nothing was written, so the camera is unchanged. The DRAM boot counter
+		# is cleared only on the flash path below (and clearing it is harmless
+		# even if no flash follows), so there is nothing to undo here.
+		restore_resources
+		# Only ever remove a lock this process owns. die() is reachable before
+		# create_lock has run (get_system_info, called from print_sysinfo, can
+		# raise one), and an unconditional rm there would unlink a CONCURRENT
+		# sysupgrade's lock and let two upgrades run at once.
+		[ "1" = "$lock_owned" ] && rm -f $LOCK_FILE
+	fi
+	exit 1
+}
+
+check_soc() {
+	# Validate the downloaded image's stamped SoC ($1 = kernel-header ksoc or
+	# rootfs hostname) against the BUILD identity $model, NOT the chip's
+	# self-report. One published image (e.g. hi3516cv6xx) legitimately serves
+	# dies that report a different id (hi3516cv610/608) via fw_printenv/ipcinfo.
+	[ "1" = "$skip_soc" ] && echo "Skip SoC validation" && return 0
+	[ "$1" = "$model" ] && echo "SoC OK" && return 0
+	die "Wrong SoC! (image '$1' != build '$model')"
+}
+
+compare_versions() {
+	[ "1" = "$skip_ver" ] && echo "Skip version checking" && return 1
+	[ "$1" = "$2" ] && echo_c 32 "Same version, nothing to update" && return 0
+	echo_c 32 "New version, going to update" && return 1
+}
+
+do_update_kernel() {
+	local x=$1
+	if [ -z "$x" ]; then
+		[ "$vendor" = "rockchip" ] && x="/tmp/zboot.img.$model" || x="/tmp/uImage.$model"
+	fi
+	echo_c 33 "\nKernel"
+	echo "Update kernel from $x"
+	[ ! -f "$x" ] && die "File $x not found"
+	if [ "1" != "$skip_soc" ]; then
+		# A FIT image (DTB magic d00dfeed, e.g. the cv6xx kernel) carries
+		# neither a uImage SoC name at offset 32 nor a uImage timestamp at
+		# offset 8: the legacy probes would misfire (ksoc garbage -> false
+		# "Wrong SoC!"; identical bogus values -> false "Same version", kernel
+		# silently skipped). For a FIT, rely on the rootfs hostname SoC check
+		# and always reflash.
+		if [ "$(xxd -p -l 4 "$x" 2>/dev/null)" = "d00dfeed" ]; then
+			echo "FIT kernel detected, skipping uImage SoC/version probe"
+		else
+			local ksoc=$(od -j 32 -N 32 -S 1 -A n "$x" | cut -d- -f3)
+			if [ "$vendor" != "ingenic" ] && [ "$vendor" != "rockchip" ]; then
+				check_soc "$ksoc"
+			fi
+			compare_versions "$kernel_version" "$(get_kernel_version "$x")" && return 0
+		fi
+	fi
+	mark_flash_touched
+	set_progress flashcp -v "$x" "$kernel_device"
+	echo_c 32 "Kernel updated to $(get_kernel_version "$kernel_device")"
+}
+
+# mount, bounded, read-only. The verify-mount does not always fail on a rootfs the
+# running kernel cannot read — it can block. Nothing is printed between the mount
+# and the flash write, so an unbounded mount that wedges is indistinguishable from
+# a dead tool: the upgrade stops with no error, taking any GUI driving it down too.
+#
+# Best-effort, not a guarantee: timeout sends TERM and then waits to reap, so a
+# mount stuck in uninterruptible sleep still outlives it. It bounds the realistic
+# failures — a slow loop/probe, or a decompressor the kernel lacks — which is what
+# strands upgrades in practice.
+#
+# -t squashfs skips kernel fs autoprobing of what may be a garbage file; the error
+# text is returned rather than discarded, so the caller can print it.
+mount_rootfs() {
+	if command -v timeout >/dev/null 2>&1; then
+		timeout "$mount_wait" mount -t squashfs -o ro "$1" "$2" 2>&1
+	else
+		mount -t squashfs -o ro "$1" "$2" 2>&1
+	fi
+}
+
+# Whether a kernel flashed in this same run validates the SoC with no mount, and
+# so can stand in for the rootfs hostname check. do_update_kernel probes the SoC
+# out of a legacy uImage header and hands it to check_soc — but a FIT image (magic
+# d00dfeed) carries no such field, and check_soc is skipped outright for ingenic
+# and rockchip. In those cases a kernel in the run proves nothing about the SoC.
+# $1 = "kernel_follows" when the caller flashes a kernel unconditionally right
+# after verifying (do_update_firmware's split path, where update_kernel is unset
+# on a plain `sysupgrade -r`).
+soc_guarded_by_kernel() {
+	local k=
+	if [ "kernel_follows" = "$1" ]; then
+		k="/tmp/uImage.$model"
+	elif [ "1" = "$update_kernel" ]; then
+		k="$kernel_file"
+		[ -z "$k" ] && k="/tmp/uImage.$model"
+	else
+		return 1
+	fi
+	[ -f "$k" ] || return 1
+	# Mirrors do_update_kernel's own skips.
+	[ "$vendor" = "ingenic" ] && return 1
+	[ "$vendor" = "rockchip" ] && return 1
+	[ "$(xxd -p -l 4 "$k" 2>/dev/null)" = "d00dfeed" ] && return 1
+	return 0
+}
+
+# Read the candidate rootfs's SoC stamp and version by loop-mounting it.
+#
+# This is a PRE-FLIGHT CHECK ONLY: the image is written with flashcp, which writes
+# the partition raw and never needs the mount. So it must run BEFORE anything is
+# written to flash, and it must not reject an image that would have flashed fine.
+verify_rootfs() {
+	local x=$1
+	[ -z "$x" ] && x="/tmp/rootfs.squashfs.$model"
+	echo_c 33 "\nVerify"
+	echo "Verifying rootfs from $x"
+	[ ! -f "$x" ] && die "File $x not found"
+
+	local y=/tmp/rootfs
+	local loop=
+	local err=
+	rootfs_version=
+
+	if mkdir -p "$y" && loop=$(losetup -f) && err=$(losetup "$loop" "$x" 2>&1) \
+		&& err=$(mount_rootfs "$loop" "$y"); then
+		rootfs_version=$(get_system_version "$y")
+		check_soc "$(head -1 $y/etc/hostname | cut -d- -f2)"
+		compare_versions "$system_version" "$rootfs_version" && exit_update=1
+		umount "$y"
+	else
+		# Unmountable is not a defect in the image. It usually means the RUNNING
+		# kernel lacks the squashfs decompressor the NEW image uses (commonly XZ) —
+		# a property of the kernel being replaced, and irrelevant the moment the new
+		# one boots. flashcp writes the partition raw and never needs the mount, so
+		# aborting here rejects an image that would have flashed fine.
+		echo_c 33 "\nCannot mount $x to verify it."
+		[ -n "$err" ] && echo_c 33 "  $err"
+		echo_c 33 "The running kernel may lack its squashfs decompressor; the image itself may be fine."
+
+		# The rootfs hostname is one of two SoC witnesses. The other is the uImage
+		# header of a kernel flashed in this same run, which check_soc reads with no
+		# mount — but that witness does not always exist (FIT kernels carry no SoC
+		# field; check_soc is skipped for ingenic/rockchip), so it cannot simply be
+		# assumed. With no witness at all, a downloaded artifact is still pinned to
+		# $model by the name it must have to be found (rootfs.squashfs.$model, md5
+		# verified), while a hand-picked --rootfs= file is pinned by nothing — and
+		# writing an unverified rootfs for a foreign SoC bricks the device. That is
+		# the case worth refusing, and refusing costs nothing here: no flash yet.
+		if [ "1" = "$skip_soc" ]; then
+			echo_c 33 "Skipping the rootfs version/SoC pre-check (SoC validation disabled)."
+		elif soc_guarded_by_kernel "$2"; then
+			echo_c 33 "Skipping the rootfs version/SoC pre-check; the SoC is validated from the kernel image header instead."
+		elif [ "1" = "$remote_update" ]; then
+			echo_c 33 "Skipping the rootfs version/SoC pre-check; the image is pinned to '$model' by its artifact name."
+		else
+			losetup -d "$loop" 2>/dev/null
+			rm -rf "$y"
+			die "Cannot verify the SoC of an unmountable rootfs, and no kernel in this run carries a SoC to check it against. Flash the matching kernel in the same run, or pass --force_soc."
+		fi
+	fi
+
+	[ -n "$loop" ] && losetup -d "$loop" 2>/dev/null
+	rm -rf "$y"
+	return 0
+}
+
+do_update_rootfs() {
+	local x=$1
+	[ -z "$x" ] && x="/tmp/rootfs.squashfs.$model"
+	echo_c 33 "\nRootFS"
+	echo "Update rootfs from $x"
+	[ ! -f "$x" ] && die "File $x not found"
+	[ "1" = "$exit_update" ] && return 0
+	mark_live_flash_dirty
+	set_progress flashcp -v "$x" "$(get_device "rootfs")"
+	echo_c 32 "RootFS updated to ${rootfs_version:-unknown}"
+}
+
+do_update_firmware() {
+	# A combined image bundles the FIT kernel (DTB magic d00dfeed) and the
+	# rootfs squashfs in one blob — the rootfs packed right after the FIT at a
+	# 64K-aligned offset (see the cv6xx board post-image.sh).
+	#
+	# Prefer the traditional NON-overlapping split: slice the blob at the FIT
+	# boundary and write the FIT to the kernel partition and the rootfs to the
+	# rootfs partition (each flashcp stays within its own partition and U-Boot
+	# reads them from those fixed offsets). Only when the flash has no separate
+	# kernel/rootfs partitions — a pure combined layout — fall back to a single
+	# whole-blob write to the "firmware" partition (which on cv6xx overlaps
+	# kernel+rootfs and is meant for whole-image programming).
+	local x=/tmp/firmware.bin.$model
+	echo_c 33 "\nFirmware (combined image)"
+	echo "Update firmware from $x"
+	[ ! -f "$x" ] && die "File $x not found"
+
+	if [ "$(get_device "kernel")" != "/dev/" ] && [ "$(get_device "rootfs")" != "/dev/" ]; then
+		# Split at the FIT totalsize (header bytes 4-7, big-endian), rounded up
+		# to the 64K erase block, then hand each slice to the split flow.
+		local hex=$(xxd -p -l 4 -s 4 "$x" 2>/dev/null)
+		local fitsz=$((0x${hex:-0}))
+		[ "$fitsz" -gt 0 ] || die "Not a FIT combined image: $x"
+		local blocks=$(((fitsz + 65535) / 65536))
+		echo "Split combined image: FIT ${fitsz}B -> kernel, remainder -> rootfs"
+		dd if="$x" bs=65536 count="$blocks" of=/tmp/uImage.$model 2>/dev/null
+		dd if="$x" bs=65536 skip="$blocks" of=/tmp/rootfs.squashfs.$model 2>/dev/null
+		# kernel_follows: the kernel is flashed unconditionally on the next line,
+		# whether or not update_kernel is set (a plain `sysupgrade -r` reaches here
+		# with it unset). Tell verify_rootfs so it weighs the same SoC evidence as
+		# --url/--channel do, instead of refusing with advice that is a no-op here.
+		verify_rootfs "/tmp/rootfs.squashfs.$model" kernel_follows
+		do_update_kernel "/tmp/uImage.$model"
+		do_update_rootfs "/tmp/rootfs.squashfs.$model"
+		return 0
+	fi
+
+	local fw_dev=$(get_device "firmware")
+	[ "$fw_dev" = "/dev/" ] && die "No kernel/rootfs or firmware partition to flash"
+	echo "Combined partition $fw_dev"
+	mark_live_flash_dirty
+	set_progress flashcp -v "$x" "$fw_dev" || die "flashcp to $fw_dev failed"
+	echo_c 32 "Firmware updated"
+}
+
+# Stop the kernel writing to the overlay before erasing the medium under it.
+#
+# do_wipe_overlay hands flash_eraseall a partition that is still a mounted, RW
+# jffs2 with its garbage-collect thread running, so two agents end up erasing and
+# writing the same medium at once. Both notice. The GC thread walks a filesystem
+# that is being deleted under it -- "Node header CRC failed ... {ffff,ffff,...}",
+# "Node totlen on flash (0xffffffff) != totlen from node ref", and inodes lost
+# outright to "no data nodes found for ino #20" -- while jffs2's own erase path
+# reads back a block it has just erased and finds someone else's cleanmarker in
+# it: "Newly-erased block contained word 0x20031985" (magic 0x1985, nodetype
+# 0x2003 -- the marker `flash_eraseall -j` writes).
+#
+# The same applies to a ubifs overlay on a NAND camera -- a background thread
+# and a live medium being erased under it -- so both spellings are handled below.
+#
+# The overlay cannot be unmounted. It is the upperdir AND workdir of the
+# overlayfs that is still root for init(1), majestic, dropbear and getty, so that
+# superblock holds a reference to this mount for as long as they exist: umount is
+# EBUSY by construction, and umount -l only detaches it from our namespace while
+# the superblock and the GC thread live on. pivot_root does not help and is not
+# meant to -- it moved THIS script's root off the doomed partition, nobody
+# else's, which is why enter_ramfs leaves the old root mounted at /mnt.
+#
+# Remounting it read-only is enough, and does work: jffs2_remount_fs() stops the
+# garbage-collect thread on the way to ro, which leaves flash_eraseall as the
+# only thing touching the medium. Anything still writing through the overlayfs
+# gets EROFS instead of reaching flash -- the outcome we want a second before a
+# reboot that is going to wipe it anyway.
+#
+# Measured on an hi3516ev300 with an overlay carrying real write history: 3 of 4
+# runs logged jffs2 errors before this, 0 of 5 after. An empty overlay is silent
+# either way, which is why a bench that has just been reset never shows it.
+#
+# The mount point is looked up rather than assumed: after the pivot the overlay
+# is at /mnt/overlay, and on the in-place fallback it is still at /overlay.
+quiesce_overlay() {
+	local blk=$(get_device "rootfs_data" | sed 's|/dev/mtd|/dev/mtdblock|')
+	# Two spellings for the same partition, because init mounts it two ways: a
+	# jffs2 camera gets /dev/mtdblockN, a ubifs one gets ubi0:rootfs_data (see
+	# general/overlay/init). Matching only the first would quietly no-op on every
+	# UBI board, where the race is the same and the cure is the same --
+	# ubifs_remount_ro() stops the background thread and commits, just as
+	# jffs2_remount_fs() stops the GC thread.
+	local mp=$(awk -v d="$blk" '
+		$1 == d || $1 ~ /^ubi[0-9]+:rootfs_data$/ { print $2; exit }' /proc/mounts)
+	# Nothing mounted on it -- an overlay this camera never brought up, or a root
+	# that put its upper layer in tmpfs instead. The erase is unopposed already.
+	[ -n "$mp" ] || return 0
+	sync
+	# A refusal is a warning, not a die: erasing it live is exactly what this
+	# did before, so falling back to that is never worse than the status quo.
+	if mount -o remount,ro "$mp" 2>&3; then
+		echo "Overlay $mp remounted read-only"
+	else
+		echo_c 33 "Could not remount $mp read-only; erasing it live."
+	fi
+}
+
+do_wipe_overlay() {
+	echo_c 33 "\nOverlayFS"
+	echo "Erase overlay partition"
+	[ "$flash_type" = "nand" ] || jffs2="-j"
+	quiesce_overlay
+	mark_live_flash_dirty
+	set_progress flash_eraseall $jffs2 "$(get_device "rootfs_data")"
+}
+
+# curl options for one URL. An https URL may redirect (a GitHub release asset
+# does), but never down to plain http: a verified connection that hands the
+# transfer to an unverified one has verified nothing.
+tls_opts() {
+	case "$1" in https://*) echo "--proto-redir =https" ;; esac
+	echo "$curl_insecure"
+}
+
+# The clock is part of certificate verification: a certificate is valid between
+# two dates, and a camera with no RTC boots at its build stamp (or fake-hwclock's
+# last checkpoint), so behind a network that blocks NTP the fetch fails with
+# BADCERT_FUTURE. That failure is what made `-k` look necessary (majestic-webui
+# #44, #121). Take the Date header of a plain-HTTP HEAD instead, as htpdate
+# does, and step the clock FORWARD only: a spoofed header can move the clock
+# ahead, which validates no certificate the bundle does not already trust.
+# Returns 0 only when the clock moved, so the caller knows a retry is worth it.
+clock_from_http() {
+	local hdr now web
+	hdr=$(curl -s -m 15 -I --proto =http "http://${MANIFEST_URL#*://}" 2>/dev/null \
+		| sed -n 's/^[Dd]ate: //p' | tr -d '\r')
+	web=$(TZ=UTC0 date -D '%a, %d %b %Y %H:%M:%S' -d "${hdr% GMT}" +%s 2>/dev/null)
+	now=$(date +%s)
+	[ -n "$web" ] && [ "$web" -gt "$now" ] || return 1
+	date -s "@$web" >/dev/null 2>&1 || return 1
+	echo_c 33 "Clock was behind; set from the HTTP Date header: $(date)"
+}
+
+# Reachability and trust, before anything is downloaded. Kept apart from the
+# download, which streams into tar where curl's exit status is lost in the
+# pipe, and because a certificate failure must not read as "Check your
+# network!" -- the two have different fixes.
+probe_url() {
+	local rc
+	curl --connect-timeout 30 -m 60 -s -o /dev/null $(tls_opts "$1") "$1"
+	rc=$?
+	if [ "$rc" -eq 60 ] && clock_from_http; then
+		curl --connect-timeout 30 -m 60 -s -o /dev/null $(tls_opts "$1") "$1"
+		rc=$?
+	fi
+	case "$rc" in
+		0) ;;
+		60) die "Certificate verification failed for $1
+The clock reads $(date). If that is wrong, fix it first (ntpd -Nnq, or date -s).
+For a private server with a self-signed certificate, add --insecure." ;;
+		77) die "Cannot read the CA bundle /etc/ssl/certs/ca-certificates.crt. Add --insecure to proceed without verification." ;;
+		*) die "Check your network!" ;;
+	esac
+}
+
+fetch_manifest() {
+	probe_url "$MANIFEST_URL"
+	curl --connect-timeout 30 -s -m 60 -L $(tls_opts "$MANIFEST_URL") "$MANIFEST_URL" -o "$MANIFEST_CACHE" \
+		|| die "Cannot fetch manifest $MANIFEST_URL"
+}
+
+# resolve_channel <nightly|latest>  -> echoes a build_id
+resolve_channel() {
+	awk -v c="$1" '$1=="@channel" && $2==c { print $3; exit }' "$MANIFEST_CACHE"
+}
+
+# resolve_url <build_id> <platform> <flash>  -> echoes a URL
+resolve_url() {
+	awk -v b="$1" -v p="$2" -v f="$3" \
+		'$1==b && $2==p && $3==f { print $NF; exit }' "$MANIFEST_CACHE"
+}
+
+# Rewrite $model from a retired/shared SoC id to the canonical model an
+# OpenIPC image is actually published under, so the download name, manifest
+# key, extracted artifact names and SoC check all reference an image that
+# exists. Two sources, in order: (1) the manifest's @alias records (chip ->
+# model) when a manifest has been fetched — authoritative, extended by
+# defconfig BR2_OPENIPC_SOC_ALIASES; (2) a tiny static net for the known
+# retired SoCs so offline / SD-card / --archive migrations resolve with no
+# network at all. Idempotent and a no-op for canonical models.
+resolve_model_alias() {
+	local m=""
+	[ -s "$MANIFEST_CACHE" ] && m=$(awk -v c="$model" \
+		'$1=="@alias" && $2==c { print $3; exit }' "$MANIFEST_CACHE")
+	[ -z "$m" ] && case "$model" in
+		xm550)      m=xm530 ;;
+		gk7205v210) m=gk7205v200 ;;
+	esac
+	[ -n "$m" ] && [ "$m" != "$model" ] && {
+		echo_c 36 "SoC alias: $model -> $m (shared platform)"
+		model="$m"
+	}
+	return 0
+}
+
+download_firmware() {
+	[ "$flash_type" = "nand" ] && echo_c 31 "\nNote: the updater uses the NOR package for updating NAND"
+	echo_c 33 "\nFirmware"
+	osr=$(get_system_build)
+	build="$model-nor-$osr"
+	if [ -n "$archive" ]; then
+		[ ! -f "$archive" ] && die "File $archive not found"
+		gzip -d "$archive" -c | tar xf - -C /tmp && echo_c 32 "Local archive unpacked" || die "Cannot extract $archive"
+	else
+		case "$osr" in lite|ultimate|neo) repo=firmware ;; esac
+		if [ -n "$channel" ] || [ -n "$build_id" ]; then
+			fetch_manifest
+			resolve_model_alias
+			[ -n "$channel" ] && build_id=$(resolve_channel "$channel")
+			[ -z "$build_id" ] && die "Unknown channel/build"
+			# Rewrite only the leading SoC token of BUILD_PLATFORM to the
+			# canonical $model (preserving any rich _variant_device suffix used
+			# by builder); fall back to ${model}_${osr} for pre-1.0.51 images.
+			platform=$(grep '^BUILD_PLATFORM=' /etc/os-release 2>/dev/null | cut -d= -f2)
+			if [ -n "$platform" ]; then platform="${model}_${platform#*_}"; else platform="${model}_${osr}"; fi
+			url=$(resolve_url "$build_id" "$platform" "nor")
+			[ -z "$url" ] && die "No artifact for $platform in $build_id"
+			echo "Resolved $build_id for $platform"
+		fi
+		[ -z "$url" ] && url=$(fw_printenv -n upgrade 2>/dev/null || echo "")
+		[ -z "$url" ] && die "No upgrade URL provided. Set 'upgrade' in U-Boot env or pass URL/file directly."
+		echo "Download from $url"
+		probe_url "$url"
+		# Show a transfer bar so the (silent, up-to-2-min) download doesn't look
+		# stuck — over /ws/upgrade this also gives the WebUI something to stream
+		# (issue #120). `-s` (silent_update) opts back out for a quiet console run.
+		[ "1" = "$silent_update" ] && dl_meter=-s || dl_meter=-#
+		# Bound the download on THROUGHPUT, not on total time. `-m 120` capped the
+		# whole transfer at two minutes, which is not a timeout but a speed
+		# requirement: a camera on a link slower than ~60 KB/s could never finish
+		# a ~7 MB image, and curl cut it off mid-stream with no hint that slowness
+		# was the reason (majestic-webui issue #120 — the WebUI log froze partway
+		# through the progress bar). --speed-limit/--speed-time instead give up
+		# only once the transfer has genuinely stalled, so a slow-but-progressing
+		# link completes. -m stays as a far outer backstop against a trickle that
+		# never trips the stall check.
+		curl --connect-timeout 30 $dl_meter --speed-limit 1024 --speed-time 60 -m 1800 \
+			-L $(tls_opts "$url") "$url" -o - | gzip -d | tar xf - -C /tmp && echo_c 32 "Received and unpacked" || die "Cannot retrieve $url"
+	fi
+	if [ "1" != "$skip_md5" ]; then
+		(cd /tmp && md5sum -s -c *.md5sum) || die "Wrong checksum!"
+	fi
+	# Combined image (FIT kernel + rootfs packed in one blob, e.g. cv6xx):
+	# flashed as a unit by do_update_firmware instead of the split path.
+	[ -f "/tmp/firmware.bin.$model" ] && image_combined=1
+}
+
+free_resources() {
+	echo_c 37 "\nStop services, sync files, free up memory"
+	# --web: majestic freed its own video pipeline and is streaming this log
+	# over /ws/upgrade; keep it alive until just before the flash (see below).
+	if [ "1" != "$web_update" ]; then
+		killall -q -3 majestic
+		sleep 1
+	fi
+	/etc/init.d/S99rc.local stop
+	/etc/init.d/S60crond stop
+	/etc/init.d/S49ntpd stop
+	/etc/init.d/S02klogd stop
+	# fake-hwclock writes /etc periodically; left running it would be a live
+	# overlay writer during the erase that quiesce_overlay() exists to fence
+	# off. Its stop also takes a final checkpoint, so the camera comes back
+	# from the post-flash reboot with the freshest time it can have.
+	/etc/init.d/S02fakehwclock stop
+
+	# The last line a collector sees if this camera never comes back.
+	#
+	# A forwarded log otherwise just stops here, and a clean stop reads exactly
+	# like a death -- on the one operation most likely to produce the latter.
+	# busybox sends no shutdown marker of its own on the remote path (it
+	# forwards the line unmodified and logs "syslogd exiting" only locally), so
+	# this has to be said out loud, before syslogd goes. #2415.
+	#
+	# "Preparing to", not "flashing": free_resources runs before check_sdcard,
+	# before the download and before any write, so several paths end here with
+	# nothing flashed at all -- and restore_resources() below logs the
+	# retraction when they do. It cannot name the image for the same reason.
+	# warning, not the default notice, because a collector that filters at
+	# >= warning should not lose the one line explaining the silence.
+	syslog_remote_set && {
+		logger -s -p user.warning -t sysupgrade \
+			"preparing to flash (kernel=${update_kernel:-0}" \
+			"rootfs=${update_rootfs:-0} overlay-wipe=${clear_overlay:-0})" \
+			"on $(get_build_id); logging stops here until this camera returns"
+		# Only for the forwarded case, and only when it is on: UDP has no
+		# retry, so the datagram needs a moment to leave before syslogd goes.
+		# Every camera used to pay this second for a feature most have off.
+		sleep 1
+	}
+	/etc/init.d/S01syslogd stop
+	services_stopped=1
+	sleep 1
+
+	sync
+	echo 3 > /proc/sys/vm/drop_caches
+	echo_c 34 "\nUptime:"
+	uptime
+	echo_c 34 "\nMemory:"
+	free -h
+	echo_c 34 "\nProcesses:"
+	ps | grep -v '\['
+}
+
+# Undo free_resources for a run that ends without rebooting.
+#
+# free_resources runs before the download, because dropping the page cache is
+# how a small camera finds the RAM to unpack the image -- so by the time a
+# download or checksum fails, syslog, klogd, ntpd, fake-hwclock and cron are
+# already stopped.
+# The reboot used to hide that: everything came back on the way up. Now that a
+# pre-flash failure leaves the camera running, it has to be undone explicitly,
+# or a refused upgrade silently costs the user their logging and their cron jobs
+# until somebody power-cycles the camera.
+#
+# Started low-number-first, the reverse of the order they were stopped in.
+restore_resources() {
+	[ "1" = "$services_stopped" ] || return 0
+	echo_c 37 "\nRestarting the services stopped for the upgrade"
+	local s
+	for s in S01syslogd S02fakehwclock S02klogd S49ntpd S60crond S99rc.local; do
+		[ -x /etc/init.d/$s ] && /etc/init.d/$s start >/dev/null 2>&1
+	done
+
+	# Retract the warning free_resources sent. Reaching here means the camera
+	# is staying up -- an abort, or a deliberate --no_reboot -- so a collector
+	# holding "logging stops here until this camera returns" is now holding a
+	# death notice for a camera that never died. Without this the log simply
+	# resumes minutes later with no explanation, and the two cases a reader has
+	# to tell apart look identical. #2415.
+	syslog_remote_set && logger -s -p user.warning -t sysupgrade \
+		"still here on $(get_build_id): this camera is not rebooting after all"
+	# majestic needs restarting, not starting: it is still running, just gutted.
+	#
+	# `killall -3 majestic` above is not a terminate. SIGQUIT is majestic's
+	# "release the SDK and keep serving" signal -- signal_quit_cb calls exit_sdk
+	# and returns, unlike SIGINT/SIGTERM which also break the event loop. So the
+	# process survives with the same pid, no video pipeline, and sdk_state NULL.
+	# Nothing brings that back in place: the SIGHUP reload early-returns on a
+	# NULL sdk_state.
+	#
+	# Unless majestic says it will do it itself. A majestic new enough to leave
+	# upgrade mode drops $MAJESTIC_OWNER while it holds one: its /ws/upgrade
+	# watcher calls leave_upgrade_mode when we exit without rebooting, and an
+	# orphan watcher covers a browser that closed early. Restarting that one is
+	# not merely redundant, it destroys the end of the transcript -- the SIGTERM
+	# lands between "Aborting." reaching the log and majestic's next read of it,
+	# so the browser is left with a log that stops just short of the reason.
+	# Measured on an hi3516av300: 1285 bytes of 1431 arrived, and the missing 146
+	# were the "File ... not found Aborting." and this very message
+	# (majestic-webui #120).
+	#
+	# Keyed on the file rather than on a version test or a new option, because
+	# self_update pulls this script onto cameras whose majestic predates that
+	# self-restore (2026-08-10) and which do still need the restart. A new
+	# command-line flag could not carry it either: arguments are parsed by the
+	# INSTALLED script before self_update re-execs, so an older one would reject
+	# it outright.
+	# The marker states an INTENTION, so confirm the process is still there to
+	# act on it. majestic removes the file in leave_upgrade_mode, but a crash
+	# leaves it behind -- and a dead majestic restores nothing, so trusting the
+	# marker alone would turn "we did not need to restart it" into "nobody
+	# restarted it", and the camera stays video-less until a power cycle. That is
+	# strictly worse than the redundant restart this replaces.
+	if [ -f "$MAJESTIC_OWNER" ] && pidof majestic >/dev/null 2>&1; then
+		echo "majestic is restoring itself; leaving it running"
+	elif [ -x /etc/init.d/S95majestic ]; then
+		/etc/init.d/S95majestic restart >/dev/null 2>&1
+	fi
+	services_stopped=
+	return 0
+}
+
+# Give the old root back its mount point.
+#
+# The shipped rootfs has no /ram, so the `mkdir -p "$RAM_ROOT"` in enter_ramfs
+# writes a new directory into the overlay's upper layer — and nothing ever took
+# it out again, so every upgrade that used the pivot left an empty
+# /overlay/root/ram behind for good (OpenIPC/majestic-webui#120).
+#
+# rmdir, never `rm -rf`: if the tmpfs is somehow still attached — a lazy umount
+# that has not completed, a staged root the flash is still executing from —
+# rmdir fails harmlessly where a recursive delete would pull the floor out from
+# under the flash. An empty directory is all there is to remove.
+ramfs_discard() {
+	# Only ever detach a tmpfs of our own. RAM_ROOT is overridable from the
+	# environment (the test harness relies on that), so an unconditional umount
+	# would happily detach real storage if it were pointed at some — the same
+	# care the stale-mount check in enter_ramfs takes, for the same reason.
+	if grep -q "^tmpfs $RAM_ROOT tmpfs" /proc/mounts 2>&3; then
+		umount "$RAM_ROOT" 2>&3
+	fi
+	# Only a mount point we created ourselves; enter_ramfs records which.
+	#
+	# A rootfs that ships /ram has it in the read-only lower layer, and rmdir
+	# does not delete one of those -- overlayfs cannot, so it records a WHITEOUT
+	# in the upper layer instead: a 0:0 character device that HIDES the shipped
+	# directory from every later boot. Verified on an overlay mount:
+	#
+	#   mkdir -p ram   (already in lower)  -> upper untouched, 0 entries
+	#   rmdir ram                          -> upper gains  c--------- 0,0 ram
+	#                                         and /ram is gone from the merge
+	#
+	# That is the same class of debris as the /overlay/root/dev/null this script
+	# already goes to lengths to avoid, and strictly worse than the empty
+	# directory the rmdir was added to clean up.
+	[ "1" = "$ram_root_shipped" ] || rmdir "$RAM_ROOT" 2>&3
+}
+
+# Everything from the first flash write onwards runs on borrowed time.
+#
+# flashcp rewrites the MTD partition that backs the mounted squashfs rootfs, and
+# the page cache is not invalidated by that: the write goes to the raw /dev/mtdN
+# character device, behind the block layer's back. So the running system keeps
+# working for exactly as long as the pages it needs stay RESIDENT. Anything
+# faulted back in afterwards reads the NEW image at the OLD offset -- garbage, or
+# EIO. free_resources() has already dropped the page cache to make room for the
+# download, so on a small camera that eviction is likely rather than theoretical.
+#
+# It is what kills the reboot: `busybox reboot` is a fork+exec of a binary living
+# on the partition just overwritten, so it fails with EIO and the camera never
+# reboots -- it sits there with a corrupt live filesystem until somebody
+# power-cycles it (OpenIPC/majestic-webui#120). The same mechanism was described
+# for the -x path in #2231, where forcing a reboot cured that symptom without
+# removing the hazard.
+#
+# Reproduced deterministically without touching MTD: copy the rootfs squashfs to
+# tmpfs, loop-mount it, exec a binary from it (fine), overwrite the backing file
+# (fine -- pages still cached), then drop caches and exec again: I/O error.
+#
+# Put back everything enter_ramfs moved, for a run that did not make it into the
+# new root.
+#
+# The fallback is supposed to be "upgrade the old way", and the old way needs
+# /dev for the MTD nodes, /proc for get_device, and /tmp for the unpacked image.
+# Returning without these does not degrade to the previous behaviour, it strands
+# the RUNNING camera with no device nodes at all -- worse than the bug the pivot
+# fixes. Moves that never happened fail harmlessly, so this is safe to call from
+# any failure point after the first one.
+#
+# Every redirection from here to the end of the function goes to fd 3 rather
+# than to /dev/null by name: this runs precisely when /dev may already have been
+# moved away, which is when writing to that name creates a file instead of
+# discarding output. See the note beside the `exec 3>` at the top.
+ramfs_unwind() {
+	cd / 2>&3
+	mount -o move "$RAM_ROOT/tmp" /tmp 2>&3
+	mount -o move "$RAM_ROOT/proc" /proc 2>&3
+	mount -o move "$RAM_ROOT/dev" /dev 2>&3
+	mount -o move "$RAM_ROOT/sys" /sys 2>&3
+	# Lazy as a fallback: /sys carries submounts (debugfs, configfs) and a
+	# move-back that does not take leaves the tmpfs busy. Observed on an ssc30kq,
+	# where the plain umount left /ram mounted -- harmless on its own, but a
+	# retry would stack a second tmpfs on top of it.
+	umount "$RAM_ROOT" 2>&3 || umount -l "$RAM_ROOT" 2>&3
+	# The mount point itself is left for the caller to reclaim: every path that
+	# runs this one ends in `return 1` out of enter_ramfs, and that is where
+	# ramfs_discard lives, so removing it here as well would just be a second
+	# owner for the same directory.
+
+	# Restoring is attempted, not guaranteed, so check it rather than assume it.
+	# Handing the in-place path an environment without /dev or /proc is the very
+	# thing this function exists to prevent: get_device reads /proc/mtd and
+	# flashcp needs the nodes under /dev. Nothing has been written at this point,
+	# so a reboot puts the camera back exactly as it was -- a far better outcome
+	# than flashing blind.
+	#
+	# Deliberately not reboot_system(): -x must not be honoured here, and there
+	# is no state left worth tidying.
+	if [ ! -c /dev/null ] || [ ! -r /proc/mounts ] ||
+		! grep -q " /tmp " /proc/mounts 2>&3; then
+		echo_c 31 "\nCould not restore /dev, /proc or /tmp after a failed pivot."
+		echo_c 31 "Rebooting instead of flashing in a broken environment."
+		echo_c 31 "Nothing was written; the camera comes back on its current firmware."
+		sync
+		busybox reboot -d 1 -f
+		exit 1
+	fi
+
+	echo_c 33 "Could not move into RAM; flashing in place instead."
+	return 1
+}
+
+# Move the whole flashing phase into a RAM filesystem and re-exec there, so that
+# nothing it needs afterwards lives on the partition it is about to overwrite.
+#
+# pivot_root on its own is not enough: it changes what paths resolve to, but the
+# already-running shell keeps its text mapped from the old squashfs inode. The
+# re-exec is what actually gets us off the doomed partition, which is why this
+# ends in `exec` and why the caller treats a return as failure.
+#
+# On success this never returns. On any failure it returns and the caller
+# flashes in place, exactly as before — a camera that cannot build a ramfs is
+# still better off upgrading than not.
+enter_ramfs() {
+	# Before touching it: is the mount point already part of the image? Recorded
+	# here rather than beside the mkdir below because every early return leads to
+	# ramfs_discard too, and it needs the answer on all of them.
+	[ -d "$RAM_ROOT" ] && ram_root_shipped=1 || ram_root_shipped=
+	[ "1" = "$skip_ramfs" ] && return 1
+	command -v pivot_root >/dev/null 2>&1 || return 1
+
+	echo_c 37 "\nMoving the flash phase into RAM"
+
+	# Not under /tmp: /tmp is moved into the new root below, and a mount point
+	# cannot be moved underneath itself.
+	mkdir -p "$RAM_ROOT" 2>/dev/null || return 1
+	# A previous attempt that could not fully unwind may have left one here;
+	# mounting over it would stack rather than replace. Only ever clear a tmpfs
+	# of our own though: RAM_ROOT is overridable from the environment (the test
+	# harness relies on that), and an unconditional umount would happily detach
+	# real storage if it were pointed at some.
+	if grep -q "^tmpfs $RAM_ROOT tmpfs" /proc/mounts 2>/dev/null; then
+		umount "$RAM_ROOT" 2>/dev/null
+	fi
+	# A cap, not a reservation: the staged root is busybox plus its libraries and
+	# the script, around 1.5 MB. Kept small because the cameras that need this
+	# most have 34 MB of RAM in total, and /tmp (holding the unpacked image) is
+	# a separate mount that does not draw on this budget.
+	mount -t tmpfs -o size=8m tmpfs "$RAM_ROOT" 2>/dev/null || return 1
+	mkdir -p "$RAM_ROOT/bin" "$RAM_ROOT/lib" "$RAM_ROOT/dev" "$RAM_ROOT/proc" \
+		"$RAM_ROOT/tmp" "$RAM_ROOT/sys" "$RAM_ROOT/mnt" 2>/dev/null || return 1
+
+	# busybox is dynamically linked here, so the loader and every library it
+	# names have to come too, or the re-exec dies with the rootfs still mapped.
+	cp /bin/busybox "$RAM_ROOT/bin/" 2>/dev/null || return 1
+	local lib
+	for lib in $(ldd /bin/busybox 2>/dev/null | grep -oE '/[^ ]*\.so[^ ]*'); do
+		[ -f "$lib" ] && cp "$lib" "$RAM_ROOT/lib/" 2>/dev/null
+	done
+	# busybox dispatches on argv[0], so without symlinks every tool the flash
+	# phase reaches for -- od, xxd, cut, grep, losetup, flashcp -- is simply "not
+	# found" once we are in the new root. The first hardware run pivoted
+	# perfectly and then could not find a single one of them.
+	local applet
+	for applet in $("$RAM_ROOT/bin/busybox" --list 2>/dev/null); do
+		ln -sf busybox "$RAM_ROOT/bin/$applet" 2>/dev/null
+	done
+	# --list is a build option; fall back to what the flash phase actually uses.
+	for applet in sh ash awk basename cat cut dd flash_eraseall flashcp grep \
+		head ln losetup ls mkdir mount od printf reboot rm rmdir sed sleep \
+		sync tail timeout umount xxd; do
+		[ -e "$RAM_ROOT/bin/$applet" ] || ln -sf busybox "$RAM_ROOT/bin/$applet" 2>/dev/null
+	done
+	# If the essentials are not there, the ramfs is worse than useless: better to
+	# hand back to the in-place path than to pivot into a root with no tools.
+	for applet in sh flashcp reboot; do
+		[ -e "$RAM_ROOT/bin/$applet" ] || return 1
+	done
+	cp "$0" "$RAM_ROOT/sysupgrade" 2>/dev/null || return 1
+	chmod +x "$RAM_ROOT/sysupgrade" 2>/dev/null
+
+	# Carry over the mounts the flash still needs: /dev for the MTD nodes, /proc
+	# for get_device and sysrq, /tmp for the unpacked images. Moving rather than
+	# binding leaves nothing pointing back into the old root.
+	#
+	# /dev goes first and takes the devtmpfs with it, so from here until the pivot
+	# the name /dev/null resolves inside the old root, where there is no such node
+	# — every redirection below therefore goes to fd 3 instead. See the `exec 3>`
+	# at the top of the script.
+	mount -o move /dev "$RAM_ROOT/dev" 2>&3 || { ramfs_unwind; return 1; }
+	mount -o move /proc "$RAM_ROOT/proc" 2>&3 || { ramfs_unwind; return 1; }
+	mount -o move /tmp "$RAM_ROOT/tmp" 2>&3 || { ramfs_unwind; return 1; }
+	mount -o move /sys "$RAM_ROOT/sys" 2>&3
+
+	# State the second phase cannot recompute once the old root is behind it.
+	# NOT _ramfs_phase: that one is set only after the pivot has actually
+	# happened. Setting it here leaks into the fallback, where it would tell
+	# die() to reboot on a failure that never touched flash -- the exact
+	# false-success this script was fixed to stop doing.
+	export model kernel_file rootfs_file kernel_device fw_dev flash_type vendor
+	export update_kernel update_rootfs clear_overlay image_combined exit_update
+	export skip_soc skip_ver skip_reboot skip_md5 web_update silent_update
+	export live_flash_dirty root_on_flash flash_touched services_stopped
+	# remote_update: verify_rootfs branches on it for an unmountable rootfs.
+	# lock_owned: die() needs it to know the lock is ours to remove.
+	export remote_update lock_owned
+	# ram_root_shipped: the second phase reclaims the old root's mount point and
+	# needs the same answer ramfs_discard does. It cannot recompute it -- by then
+	# $RAM_ROOT names a directory in the NEW root, not the one being judged.
+	export ram_root_shipped
+	export kernel_version system_version rootfs_version mount_wait abort_wait
+
+	cd "$RAM_ROOT" || { ramfs_unwind; return 1; }
+	# After this the old root is at ./mnt and still mounted — deliberately: the
+	# MTD partitions are addressed through /dev, not through it.
+	if ! pivot_root . mnt 2>&3; then
+		ramfs_unwind
+		return 1
+	fi
+
+	# Past the pivot there is no way back, so this is where the second phase is
+	# declared -- see the note above the other exports.
+	export _ramfs_phase=1
+
+	# `chroot .` is what actually re-points this process's root; pivot_root only
+	# moved the mounts. Then exec so the shell interpreting the rest is the copy
+	# in RAM, not the one on the flash we are about to erase.
+	exec ./bin/busybox chroot . /bin/busybox ash /sysupgrade
+
+	# exec only returns on failure, and the old root is behind ./mnt by now, so
+	# there is no system left to hand back to the caller -- returning would send
+	# the fallback off to flash against a root it can no longer see. Nothing has
+	# been written yet, so a reboot simply comes back on the current firmware.
+	echo_c 31 "Cannot exec inside the ramfs; rebooting (nothing was flashed)"
+	./bin/busybox reboot -d 1 -f
+	exit 1
+}
+
+set_progress() {
+	if [ "1" = "$silent_update" ]; then
+		busybox "$@" | awk '{print NR, $1}'
+	else
+		busybox "$@"
+	fi
+}
+
+sync_time() {
+	echo_c 37 "\nSynchronizing time"
+	# Bound the sync: with no reachable NTP server `ntpd -q` can block for
+	# minutes and strand the upgrade at this step (WebUI issue #120). An
+	# unsynced clock is still not fatal: every fetch after this verifies the
+	# server certificate, and when that fails on the date probe_url falls back
+	# to the HTTP Date header (clock_from_http) rather than to skipping the
+	# verification.
+	if command -v timeout >/dev/null 2>&1; then
+		timeout 30 ntpd -Nnq
+	else
+		ntpd -Nnq
+	fi
+	echo_c 33 "$(date)"
+}
+
+self_update() {
+	if echo "$args" | grep -E "\-(k|r|w|url|channel|build)" >/dev/null 2>&1; then
+		sync_time
+		# The WebUI flow must not re-exec a freshly downloaded sysupgrade: a
+		# pre-patch master copy would reject --web. Time is synced; carry on.
+		[ "1" = "$web_update" ] && return
+		echo -e "\nChecking for sysupgrade update..."
+		# What lands in /tmp/sysupgrade is exec'd as root a few lines down, so:
+		# verified TLS, https only (no redirect may step down to http), -f so an
+		# error page is not kept, and staged through a rename so a transfer that
+		# died half-way cannot leave a truncated script that still carries the
+		# shebang and a foreign scr_version. And only the copy THIS run fetched is
+		# ever looked at: whatever an earlier run left behind (one made with
+		# --insecure, say) is removed first, so a failed fetch cannot fall
+		# through to it. Removing the file the running shell may itself have
+		# been exec'd from is fine -- it keeps reading the unlinked inode.
+		[ -z "$LUMI_SYSUPGRADE_URL" ] && return 0
+		rm -f /tmp/sysupgrade /tmp/sysupgrade.part
+		if curl -s -f -L --proto =https --proto-redir =https $curl_insecure -o /tmp/sysupgrade.part \
+			"$LUMI_SYSUPGRADE_URL" \
+			&& mv /tmp/sysupgrade.part /tmp/sysupgrade \
+			&& grep -q "#!/bin/sh" /tmp/sysupgrade; then
+			dstv=$(grep scr_version /tmp/sysupgrade | head -1 | cut -f 2 -d '=')
+			if ! [ "$scr_version" = "$dstv" ]; then
+				echo "A new version is available, trying to activate updated script..."
+				chmod +x /tmp/sysupgrade
+				echo -e "Done. Restarting...\n"
+				exec /tmp/sysupgrade $args
+				exit 1
+			else
+				echo "Same version. No update required."
+			fi
+		else
+			rm -f /tmp/sysupgrade.part
+			echo -e "\nVersion checking failed, proceeding with the installed version."
+		fi
+	else
+		echo -e "\nOffline operations."
+	fi
+}
+
+check_sdcard() {
+	echo_c 33 "\nUnmounting SD card"
+	stoplist="autoupdate-kernel.img autoupdate-rootfs.img autoupdate-uboot.img"
+	while [ -n "$(mount | grep /mnt/mmc)" ]; do
+		local d=$(mount | grep /mnt/mmc | tail -1 | awk '{print $3}')
+		echo_c 34 "$d"
+		local f
+		for f in $stoplist; do
+			echo "- checking for $d/$f"
+			if [ -f "$d/$f" ]; then
+				# die(), not a bare exit. check_sdcard runs after create_lock
+				# and free_resources, so leaving straight from here left the
+				# camera holding everything they had just taken: the lock file,
+				# so every later run answered "Another sysupgrade process is
+				# already running!" until a reboot cleared /tmp; syslogd, klogd,
+				# ntpd, crond and fake-hwclock stopped; majestic gutted by the
+				# SIGQUIT free_resources sends, so no video until someone
+				# rebooted; and, since #2417, a collector left holding "logging
+				# stops here until this camera returns" for a camera that was
+				# never touched. Nothing has been written at this point, so
+				# die() takes its no-reboot branch and puts all of it back.
+				die "Cannot upgrade! Recovery file $d/$f found on the mounted SD card. Remove the card from the slot and restart sysupgrade."
+			fi
+		done
+		umount $d
+	done
+}
+
+create_lock() {
+	if [ -f $LOCK_FILE ]; then
+		echo_c 31 "\nAnother sysupgrade process is already running!"
+		exit 1
+	fi
+	touch $LOCK_FILE
+	# Ownership, so die() can tell "my lock" from "somebody else's".
+	lock_owned=1
+}
+
+get_device() {
+	local name="$1"
+	# PRJ008 names its squashfs MTD partition "root"; sysupgrade calls it
+	# "rootfs". Keep the standard callers and resolve that board alias here.
+	[ "$name" = "rootfs" ] && name="root"
+	echo -n "/dev/$(grep "\"$name\"" /proc/mtd | cut -d: -f1)"
+}
+
+# Record that a write is about to land on flash that backs the RUNNING
+# filesystem, so reboot_system knows --no_reboot can no longer be honoured.
+#
+# Called BEFORE the write, not after: flashcp erases the partition before it
+# writes, so an interrupted or failed write is exactly as fatal as a completed
+# one — and do_update_firmware's `|| die` reaches reboot_system by that path.
+mark_live_flash_dirty() {
+	mark_flash_touched
+	[ "1" = "$root_on_flash" ] && live_flash_dirty=1
+	return 0
+}
+
+# Record that flash has been erased or written, so die() knows a reboot is now
+# the least-bad option. Broader than live_flash_dirty: it also covers the kernel
+# partition, which is not mounted (so it never forces a reboot on the success
+# path) but is just as much a point of no return once flashcp has started on it.
+mark_flash_touched() {
+	flash_touched=1
+	return 0
+}
+
+get_kernel_version() {
+	# A FIT image (DTB magic d00dfeed) has no uImage timestamp at offset 8;
+	# the legacy read would print a bogus 1970 date. Used for display and, on
+	# split-layout boards, the kernel compare — keep it honest for both.
+	[ -e "$1" ] || { echo "n/a"; return; }
+	[ "$(xxd -p -l 4 "$1" 2>/dev/null)" = "d00dfeed" ] && { echo "n/a (FIT)"; return; }
+	local ts=$(xxd -l 4 -s 8 -p "$1" 2>/dev/null | xargs)
+	[ -n "$ts" ] || { echo "n/a"; return; }
+	# Display the epoch via `-d @SECONDS`. A bare positional `@SECONDS` is
+	# treated by busybox as a clock-SET request ("date: can't set date") and
+	# yields nothing, which would make compare_versions see two empty strings
+	# and wrongly skip the kernel update.
+	date -d @$((0x$ts)) "+%H:%M:%S %Y-%m-%d"
+}
+
+get_system_info() {
+	vendor=$(ipcinfo -v)
+	# Upgrade identity is the BUILD platform, not the chip. BUILD_PLATFORM is
+	# ${soc}_${variant}[_${device}]; the SoC model is its leading token (no
+	# SOC_MODEL contains '_'). This decouples one published image (e.g. the
+	# single cv6xx build) from the per-die id a camera reports via
+	# fw_printenv/ipcinfo. soc is kept for display and as the pre-1.0.51
+	# fallback; fw_printenv is no longer fatal (it returns nothing when the
+	# U-Boot env partition is empty/unwritten) as long as BUILD_PLATFORM is set.
+	model=$(grep '^BUILD_PLATFORM=' /etc/os-release 2>/dev/null | cut -d= -f2 | cut -d_ -f1)
+	soc=$(fw_printenv -n soc 2>/dev/null)
+	[ -z "$model" ] && model="$soc"
+	[ -z "$model" ] && die "Cannot determine SoC: no BUILD_PLATFORM and no U-Boot 'soc'"
+	resolve_model_alias
+	kernel_device=$(get_device "kernel")
+	[ "$kernel_device" = "/dev/" ] && kernel_device=$(get_device "firmware")
+	kernel_version=$(get_kernel_version "$kernel_device")
+	system_version=$(get_system_version "")
+	flash_type=$(ipcinfo -F)
+	# 1 when the running filesystem is served from the flash this run may
+	# rewrite. init(1) mounts the rw overlay from "rootfs_data" and pivots onto
+	# the squashfs the kernel booted from, so on a flash root BOTH partitions
+	# this script erases are backing the live mount.
+	#
+	# Only a `root=` naming something that is NOT flash proves the safe case, so
+	# the test is anchored to that token. general/overlay/init greps for a bare
+	# `mmcblk`/`ram` anywhere in the line — harmless when the answer only picks a
+	# mount type, but here a stray substring (an mtdparts label, an allocator
+	# name) would certify a flash-root camera as safe and brick it. Anything not
+	# positively proven to live elsewhere — NAND `root=ubi0:rootfs`, an
+	# unreadable /proc/cmdline — counts as flash, which at worst costs a reboot.
+	root_on_flash=1
+	grep -qE '(^|[[:space:]])root=(/dev/)?(nfs|mmcblk|ram)' /proc/cmdline 2>/dev/null \
+		&& root_on_flash=0
+}
+
+get_system_version() {
+	grep "GITHUB_VERSION" "$1/etc/os-release" | head -1 | cut -d= -f2 | sed 's/"//g'
+}
+
+get_system_build() {
+	grep "BUILD_OPTION" "/etc/os-release" | head -1 | cut -d= -f2
+}
+
+# The build this camera is running now. Beside get_system_build rather than
+# spelled a third way at each call site: --list-builds had its own grep|cut and
+# free_resources nearly grew another, which is two places to find when the
+# os-release format next changes.
+get_build_id() {
+	grep '^BUILD_ID=' /etc/os-release 2>/dev/null | head -1 | cut -d= -f2
+}
+
+# Is this camera forwarding its log off-box? Only then is it worth spending a
+# second letting a datagram out before syslogd stops -- see free_resources.
+# Matches the knob S01syslogd reads (#2415).
+syslog_remote_set() {
+	grep -qs '^[[:space:]]*SYSLOG_REMOTE=[^[:space:]]' /etc/default/syslogd
+}
+
+print_sysinfo() {
+	get_system_info
+	echo_c 33 "Lumi Camera System Updater v$scr_version"
+	echo_c 36 "\nVendor\t$vendor\nSoC\t$soc\nModel\t$model\nKernel\t$kernel_version\nRootFS\t$system_version"
+}
+
+print_usage() {
+	echo "
+Usage: $0 [options]
+Where:
+  -k                    Update kernel from online repository.
+  -r                    Update rootfs from online repository.
+      --url=[URL]       Custom URL to update from (.tgz format).
+      --archive=[FILE]  Custom archive to update from (.tgz format).
+      --kernel=[FILE]   Update kernel from file (uImage format).
+      --rootfs=[FILE]   Update rootfs from file (squashfs format).
+      --channel=[NAME]  Update from a named channel via the manifest
+                        (nightly | latest). Default URL would be used
+                        otherwise.
+      --build=[ID]      Update to a specific dated build via the manifest,
+                        e.g. nightly-20260520-b9d5883.
+      --list-builds[=N] List the last N (default 20) builds available for
+                        this platform; mark the running build with '*'.
+  -f, --force_all       Do not validate anything.
+  -n, --wipe_overlay    Wipe overlay partition.
+  -x, --no_reboot       Do not reboot after updating. Ignored when the update
+                        rewrites the flash the camera is running from, which
+                        no running system survives.
+  -z, --no_update       Do not update self.
+      --insecure        Skip TLS certificate verification for this run: a
+                        private mirror with a self-signed certificate. Never
+                        needed for OpenIPC's own servers.
+      --no_ramfs        Flash from the rootfs instead of moving into RAM first.
+                        Reinstates the failure this guards against; for board
+                        bring-up only.
+      --web             Invoked by the WebUI: keep majestic alive so it can
+                        stream progress over /ws/upgrade.
+  -h, --help            Display this help and exit.
+
+Manifest URL: \$MANIFEST_URL (default: $MANIFEST_URL)
+"
+}
+
+reboot_system() {
+	# Nothing landed on flash the running system is served from: -x is safe to
+	# honour. Return rather than exit, so the caller owns the status — the main
+	# path falls through to `exit 0` (a deliberate --no_reboot run is a success,
+	# it used to report failure) while die() keeps its own `exit 1`.
+	if [ "1" = "$skip_reboot" ] && [ "1" != "$live_flash_dirty" ]; then
+		echo_c 33 "\nYou asked me not to reboot, so I won't."
+		echo_c 31 "Although a reboot is required to apply the changes."
+		echo_c 37 "Please reboot the camera manually whenever possible."
+		# Same reasoning as die(): this run stays up, so what free_resources
+		# stopped has to come back rather than wait for a reboot that was
+		# explicitly declined.
+		restore_resources
+		rm $LOCK_FILE
+		return 0
+	fi
+	if [ "1" = "$skip_reboot" ]; then
+		# -x cannot be honoured here. The flash this camera runs from has been
+		# rewritten under the running kernel, so the live filesystem is already
+		# inconsistent: reads miss the cache free_resources() dropped and come
+		# back as the new image at stale offsets. There is no "reboot it later" —
+		# the shell that would issue the reboot is one of the things that stops
+		# working, which is how issue #2231 was reported: the camera still
+		# answered ping, but no login succeeded and only a power cycle recovered
+		# it. Reboot now, while we still can.
+		echo_c 31 "\n--no_reboot ignored: the flash this camera runs from was rewritten."
+		echo_c 31 "The running filesystem cannot survive that; only a reboot applies it."
+	fi
+	echo_c 37 "\nUnconditional reboot"
+	busybox reboot -d 1 -f
+}
+
+# Do everything that writes flash, then reboot. A function because it is entered
+# from two places: normally after enter_ramfs has re-exec'd us inside the ramfs,
+# and directly when there is no ramfs to move into.
+flash_and_reboot() {
+if [ "1" = "$image_combined" ]; then
+	# One blob covers both kernel and rootfs; any of -k/-r/--url/--channel
+	# maps to a single combined write.
+	{ [ "1" = "$update_kernel" ] || [ "1" = "$update_rootfs" ]; } && do_update_firmware
+else
+	# Verify the rootfs BEFORE the first write. The kernel is flashed first, and
+	# this check used to live inside do_update_rootfs — so a rootfs that failed
+	# verification was only ever discovered once the kernel had already been
+	# committed, leaving a half-upgraded device: new kernel, old rootfs, and no
+	# way back except a manual flash. Checking first means a failure costs nothing.
+	[ "1" = "$update_rootfs" ] && verify_rootfs "$rootfs_file"
+	[ "1" = "$update_kernel" ] && do_update_kernel "$kernel_file"
+	[ "1" = "$update_rootfs" ] && do_update_rootfs "$rootfs_file"
+fi
+[ "1" = "$clear_overlay" ] && do_wipe_overlay
+
+reboot_system
+
+exit 0
+}
+
+for i in "$@"; do
+	case $i in
+		-h | --help)
+			print_sysinfo
+			print_usage
+			exit 0
+			;;
+
+		-k)
+			update_kernel=1
+			remote_update=1
+			shift
+			;;
+
+		--kernel=*)
+			update_kernel=1
+			kernel_file="${i#*=}"
+			[ "$kernel_file" != ${kernel_file#/mnt/mmc} ] && skip_unmount=1
+			shift
+			;;
+
+		-r)
+			update_rootfs=1
+			remote_update=1
+			shift
+			;;
+
+		--rootfs=*)
+			update_rootfs=1
+			rootfs_file="${i#*=}"
+			[ "$rootfs_file" != ${rootfs_file#/mnt/mmc} ] && skip_unmount=1
+			shift
+			;;
+
+		--url=*)
+			update_kernel=1
+			update_rootfs=1
+			remote_update=1
+			url="${i#*=}"
+			shift
+			;;
+
+		--channel=*)
+			update_kernel=1
+			update_rootfs=1
+			remote_update=1
+			channel="${i#*=}"
+			shift
+			;;
+
+		--build=*)
+			update_kernel=1
+			update_rootfs=1
+			remote_update=1
+			build_id="${i#*=}"
+			shift
+			;;
+
+		--list-builds*)
+			list_n="${i#--list-builds=}"
+			[ "$list_n" = "--list-builds" ] && list_n=20
+			list_only=1
+			shift
+			;;
+
+		--archive=*)
+			update_kernel=1
+			update_rootfs=1
+			remote_update=1
+			skip_selfupdate=1
+			archive="${i#*=}"
+			shift
+			;;
+
+		-f | --force_all | --force_md5 | --force_soc | --force_ver)
+			skip_md5=1
+			skip_soc=1
+			skip_ver=1
+			shift
+			;;
+
+		-n | --wipe_overlay)
+			clear_overlay=1
+			shift
+			;;
+
+		-x | --no_reboot)
+			skip_reboot=1
+			shift
+			;;
+
+		--no_ramfs)
+			# Escape hatch: flash from the rootfs the old way. For bringing up a
+			# board where the pivot itself is suspect — it gives back the failure
+			# mode this option exists to avoid, so it is not a general-purpose flag.
+			skip_ramfs=1
+			shift
+			;;
+
+		-z | --no_update)
+			skip_selfupdate=1
+			shift
+			;;
+
+		--insecure)
+			# Only for a mirror whose certificate the bundle cannot verify. With
+			# this set a man-in-the-middle can hand the camera anything, including
+			# the script self_update execs, so say so where it cannot be missed.
+			curl_insecure=-k
+			echo_c 31 "--insecure: TLS certificates will NOT be verified this run"
+			shift
+			;;
+
+		-s)
+			silent_update=1
+			shift
+			;;
+
+		--web)
+			# Invoked by majestic's /ws/upgrade: majestic has already freed its
+			# own video pipeline and is streaming this log over the WebSocket, so
+			# don't kill it up front — stop it only just before the flash.
+			web_update=1
+			shift
+			;;
+
+		*)
+			print_sysinfo
+			echo_c 37 "\nUnknown option: $1"
+			print_usage
+			exit 1
+			;;
+	esac
+done
+
+# Second phase of a ramfs upgrade. enter_ramfs re-exec'd us with no arguments
+# inside the new root, so everything before the flash — probing, download,
+# verification, stopping services — has already happened in the process that
+# pivoted us here, and its results arrived in the environment. Go straight to
+# the writes; flash_and_reboot never returns.
+if [ "1" = "$_ramfs_phase" ]; then
+	echo_c 34 "Flashing from RAM (pid $$)"
+	# pivot_root detached the tmpfs from the old root's $RAM_ROOT and parked that
+	# root at /mnt, so what is left there is the bare mount point enter_ramfs
+	# created — an empty directory in the overlay's upper layer that nothing will
+	# ever read again. Take it back now, while there is still a filesystem under
+	# /mnt to take it from: the first flashcp write is a few lines away and the
+	# old root does not survive it (OpenIPC/majestic-webui#120).
+	#
+	# ...but ONLY one we created. The rootfs now ships /ram (see the mount point
+	# in general/overlay/), so on any current image this directory lives in the
+	# read-only lower layer, and rmdir cannot delete one of those -- overlayfs
+	# records a WHITEOUT in the upper layer instead, which HIDES the shipped
+	# mount point from every later boot. ramfs_discard was given this guard when
+	# /ram started shipping; this line is the same rmdir on the path that
+	# actually runs (a successful pivot never reaches ramfs_discard), and it was
+	# missed -- so the whiteout replaced the stray directory it was meant to fix,
+	# on upgrade and on factory reset alike (@usa-, majestic-webui#120).
+	[ "1" = "$ram_root_shipped" ] || rmdir "/mnt$RAM_ROOT" 2>/dev/null
+	flash_and_reboot
+fi
+
+print_sysinfo
+
+if [ "1" = "$list_only" ]; then
+	fetch_manifest
+	resolve_model_alias
+	osr=$(get_system_build)
+	platform=$(grep '^BUILD_PLATFORM=' /etc/os-release 2>/dev/null | cut -d= -f2)
+	if [ -n "$platform" ]; then platform="${model}_${platform#*_}"; else platform="${model}_${osr}"; fi
+	here=$(get_build_id)
+	builds=$(awk -v p="$platform" '$2==p && $3=="nor" { print $1 }' "$MANIFEST_CACHE" \
+		| head -n "${list_n:-20}")
+	if [ -z "$builds" ]; then
+		echo_c 33 "\nNo builds available for $platform yet."
+		echo "Manifest: $MANIFEST_URL"
+		exit 0
+	fi
+	echo_c 33 "\nAvailable builds for $platform (newest first):"
+	echo "$builds" | awk -v h="$here" '{ printf "  %s %s\n", ($1==h?"*":" "), $1 }'
+	exit 0
+fi
+
+[ "1" != "$clear_overlay" ] &&
+[ "1" != "$update_kernel" ] &&
+[ "1" != "$update_rootfs" ] &&
+	echo_c 37 "\nTry '$(basename "$0") --help' for options." &&
+	exit 0
+
+[ "1" != "$skip_selfupdate" ] && self_update
+
+create_lock
+free_resources
+
+[ "1" != "$skip_unmount" ] && check_sdcard
+[ "1" = "$remote_update" ] && download_firmware
+
+# -x cannot be honoured for a write that lands on the flash this camera runs
+# from (see reboot_system). Say so before the first write rather than after it:
+# the trap below takes Ctrl-C away, deliberately, for the rest of the run, so
+# this is the last moment an operator who truly cannot afford a reboot can get
+# out. image_combined is only known once download_firmware has run, and it is
+# what covers a plain `-k` against a combined image (that writes the rootfs
+# with update_rootfs unset).
+if [ "1" = "$skip_reboot" ] && [ "1" = "$root_on_flash" ] &&
+	{ [ "1" = "$update_rootfs" ] || [ "1" = "$image_combined" ] || [ "1" = "$clear_overlay" ]; }; then
+	echo_c 31 "\nNOTICE: -x was requested, but this run rewrites the flash this camera"
+	echo_c 31 "is running from. -x cannot be honoured for that: the running filesystem"
+	echo_c 31 "does not survive it. The camera will be rebooted once flashing is done."
+	echo_c 37 "Press Ctrl-C now to abort. Continuing in $abort_wait seconds..."
+	sleep "$abort_wait"
+fi
+
+# Clear the bootloader's boot counter so the freshly written image starts with a
+# clean slate: if it never reaches a healthy userspace, U-Boot boots FAILSAFE
+# (network + SSH only) after bootlimit tries instead of looping on a broken
+# image, and S99bootok clears the counter again once majestic is up.
+# bootcount-clear ships only on families that reserve the counter
+# (package/openipc-failsafe) and reads its address from the board DTS, so it is
+# a safe no-op elsewhere and never writes another platform's memory (#2396); it
+# touches no flash either, unlike an env-backed counter whose per-boot NOR
+# writes wear the chip and risk a bricked env on a power cut. Done on the
+# still-normal system, before enter_ramfs moves things out of reach.
+command -v bootcount-clear >/dev/null 2>&1 && bootcount-clear
+
+# A camera that ever ran the pre-verify U-Boot has verify=n saved in flash,
+# where it still overrides the built-in default; drop the key so the kernel
+# image is CRC-checked on boot again.
+if command -v fw_setenv >/dev/null 2>&1; then
+	fw_setenv verify 2>/dev/null ||
+		echo_c 33 "Warning: could not clear a saved verify=n; a corrupt kernel may not be caught on boot."
+fi
+
+# Past this point we erase flash. A controlling-TTY death (SSH session drop,
+# stray Ctrl-C, etc.) must not kill flashcp mid-write — that leaves the rootfs
+# partition partially erased and unbootable. SIG_IGN is inherited across
+# fork+exec, so this also shields the busybox flashcp child. See issue #2024.
+trap '' HUP INT TERM PIPE
+echo_c 37 "\nProtected: flashing continues even if this terminal disconnects."
+
+# On success this never comes back — the rest runs in the re-exec'd process
+# inside the ramfs. A camera that cannot give us one still has to upgrade, so a
+# failure here falls through and flashes in place exactly as before.
+if ! enter_ramfs; then
+	# The pivot did not take, so the in-place flash below needs none of what was
+	# staged for it. enter_ramfs bails out from a dozen places and cannot tidy up
+	# from inside each one, so the single path that means "no pivot" does it:
+	# otherwise a camera that merely FAILED to move into RAM was still left with
+	# the mount point, and on the earliest bail-outs with a tmpfs on it too.
+	# ramfs_unwind may already have done both, in which case this is a no-op.
+	ramfs_discard
+fi
+flash_and_reboot

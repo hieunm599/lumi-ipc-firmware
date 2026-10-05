@@ -123,7 +123,6 @@ ALL_BOARDS = [
 # an option, which is the actual fix --- the list below is just today's answer.
 UNBUILT_BOARDS = {
     "t33_lite": "requires the local Ingenic T32/T33 SDK, which is not distributed to CI",
-    "t23n_dual_lumi": "Lumi physical dual-camera bring-up; built locally, not published by upstream CI",
     # Firmware-identical to a board that IS built, and served from it via
     # BR2_OPENIPC_SOC_ALIASES (manifest @alias). Building them would ship two
     # bit-identical images under different names. These two were already
@@ -225,7 +224,6 @@ SMOKE_BOARDS = [
 # listed rather than inferred so that a family silently falling out of the
 # matrix fails --self-test instead of quietly skipping CI.
 UNBUILT_FAMILIES = {
-    ("br-ext-chip-ingenic", "t23n-dual"),  # local physical-board profile
     ("br-ext-chip-allwinner", "v83x"),
     ("br-ext-chip-ambarella", "s3l"),
     ("br-ext-chip-anyka", "ak3918ev300"),
@@ -268,7 +266,6 @@ UNBUILT_FAMILIES = {
 # which no defconfig in ALL_BOARDS has. OpenIPC/builder's gk7205v200_otg_generic
 # selects it. A mainline dual-role defconfig would take it off this list.
 NOT_BUILT = {
-    "lumi-t23-dual-sdk", "lumi-aic8800",  # selected by local t23n_dual_lumi
     "adaptive-link", "aic8800-openipc", "allwinner-osdrv-v83x", "atbm-wifi",
     "aura-httpd", "baresip-openipc", "comgt", "f2fs-tools-openipc", "faceter-agent",
     "faceter-detector", "fdk-aac-openipc", "ffmpeg-openipc", "gdbserver-lite",
