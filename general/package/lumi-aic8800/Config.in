@@ -1,0 +1,7 @@
+config BR2_PACKAGE_LUMI_AIC8800
+	bool "Lumi AIC8800DC USB Wi-Fi"
+	depends on BR2_LINUX_KERNEL
+	depends on !BR2_PACKAGE_AIC8800_OPENIPC
+	help
+	  USB a69c:88dc driver and complete AIC8800DC firmware payload.
+	  Documented upstream: https://github.com/gtxaspec/aic8800-wifi

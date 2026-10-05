@@ -1,0 +1,118 @@
+#!/bin/sh
+
+NAME="lumi-ipc-streamer-watch"
+PIDFILE="/var/run/$NAME.pid"
+STREAMER_INIT="/etc/init.d/S60lumi-streamer"
+STREAMER_PIDFILE="/var/run/lumi-ipc-streamer.pid"
+STREAMER_BIN="/overlay/lumi-ipc-streamer/bin/ipc-stream-supervisor"
+P2P_INIT="/overlay/lumi-ipc-streamer/bin/lumi-t33gs-p2p"
+P2P_CONFIG="/overlay/lumi-ipc-streamer/p2p.conf"
+P2P_PIDFILE="/var/run/lumi-t33gs-p2p.pid"
+RELAY_INIT="/overlay/lumi-ipc-streamer/bin/lumi-t33gs-relay-agent"
+RELAY_CONFIG="/overlay/lumi-ipc-streamer/relay-agent.env"
+RELAY_KEY="/overlay/lumi-ipc-streamer/relay-key.json"
+NETWORK_CONFIG="/overlay/lumi-ipc-streamer/network.env"
+RELAY_PIDFILE="/var/run/lumi-t33gs-relay-agent.pid"
+
+wlan_ip() {
+	# Keep the RTSP listener tied to a live Wi-Fi link. Linux can retain its
+	# DHCP address after wlan0 is administratively down or loses association.
+	if ! ifconfig wlan0 2>/dev/null | grep -q 'UP .*RUNNING'; then
+		return 0
+	fi
+	ip -4 -o addr show dev wlan0 2>/dev/null | awk '{split($4, a, "/"); print a[1]; exit}'
+}
+
+ensure_default_route() {
+	[ -r "$NETWORK_CONFIG" ] || return 0
+	WLAN_GATEWAY=""
+	. "$NETWORK_CONFIG"
+	case "$WLAN_GATEWAY" in
+		""|*[!0-9.]*|.*|*..*|*.) return 0 ;;
+	esac
+	if ! ip -4 route show default dev wlan0 2>/dev/null | grep -q '^default '; then
+		route add default gw "$WLAN_GATEWAY" dev wlan0
+	fi
+}
+
+streamer_running() {
+	[ -s "$STREAMER_PIDFILE" ] || return 1
+	pid=$(cat "$STREAMER_PIDFILE")
+	[ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
+p2p_running() {
+	[ -s "$P2P_PIDFILE" ] || return 1
+	pid=$(cat "$P2P_PIDFILE")
+	[ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
+relay_running() {
+	[ -s "$RELAY_PIDFILE" ] || return 1
+	pid=$(cat "$RELAY_PIDFILE")
+	[ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
+watch() {
+	trap 'exit 0' HUP INT TERM
+	last_ip=""
+	while :; do
+		current_ip=$(wlan_ip)
+		if [ ! -x "$STREAMER_BIN" ]; then
+			:
+		elif [ -n "$current_ip" ]; then
+			ensure_default_route
+			if ! streamer_running; then
+				"$STREAMER_INIT" start
+			elif [ -n "$last_ip" ] && [ "$current_ip" != "$last_ip" ]; then
+				"$STREAMER_INIT" restart
+			fi
+			if streamer_running && [ -x "$P2P_INIT" ] && [ -s "$P2P_CONFIG" ] && ! p2p_running; then
+				"$P2P_INIT" start
+			fi
+			if streamer_running && p2p_running && [ -x "$RELAY_INIT" ] && [ -s "$RELAY_CONFIG" ] && [ -s "$RELAY_KEY" ] && ! relay_running; then
+				"$RELAY_INIT" start
+			fi
+		elif streamer_running; then
+			"$STREAMER_INIT" stop
+		fi
+		last_ip="$current_ip"
+		sleep 5
+	done
+}
+
+start() {
+	if [ -s "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+		echo "Starting $NAME: already running (PID $(cat "$PIDFILE"))"
+		return 0
+	fi
+	rm -f "$PIDFILE"
+	watch >>"/tmp/$NAME.log" 2>&1 &
+	pid=$!
+	echo "$pid" >"$PIDFILE"
+	echo "Starting $NAME: OK (PID $pid)"
+}
+
+stop() {
+	if [ -s "$PIDFILE" ]; then
+		pid=$(cat "$PIDFILE")
+		if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+			kill -TERM "$pid" 2>/dev/null
+			tries=0
+			while kill -0 "$pid" 2>/dev/null && [ "$tries" -lt 3 ]; do
+				sleep 1
+				tries=$((tries + 1))
+			done
+			kill -0 "$pid" 2>/dev/null && kill "$pid" 2>/dev/null
+		fi
+		rm -f "$PIDFILE"
+	fi
+	"$STREAMER_INIT" stop
+	echo "Stopping $NAME: OK"
+}
+
+case "$1" in
+	start|stop) "$1" ;;
+	restart|reload) stop; start ;;
+	*) echo "Usage: $0 {start|stop|restart|reload}" >&2; exit 1 ;;
+esac

@@ -13,9 +13,8 @@ echo_c() {
 
 if [ "$PS1" ]; then
 	[ -f /etc/os-release ] && . /etc/os-release
-	[ -f /etc/openipc_banner ] && echo_c 34 "\n$(cat /etc/openipc_banner)"
-	echo_c 32 "$(printf %51s "$GITHUB_VERSION")"
-	[ -f /etc/openipc_donors ] && echo_c 37 "\n\n$(cat /etc/openipc_donors)\n\n"
+	[ -f /etc/openipc_banner ] && echo_c 34 "\n$(cat /etc/openipc_banner)\n"
+	[ -n "$GITHUB_VERSION" ] && echo_c 32 "$(printf %51s "$GITHUB_VERSION")\n"
 	if [ "$(id -u)" -eq 0 ]; then
 		export PS1='\u@\h:\w\# '
 	else
@@ -32,7 +31,15 @@ network() {
 }
 
 streamer() {
-	/etc/init.d/S95majestic "$1"
+	if [ -x /etc/init.d/S60streamer ]; then
+		/etc/init.d/S60streamer "$1"
+	elif [ -x /etc/init.d/S95lumi-streamer ]; then
+		/etc/init.d/S95lumi-streamer "$1"
+	elif [ -x /etc/init.d/S95majestic ]; then
+		/etc/init.d/S95majestic "$1"
+	else
+		echo "No streamer service found"
+	fi
 }
 
 set_fullname() {
@@ -45,13 +52,17 @@ set_fullname() {
 }
 
 show_config() {
-	diff -L "Majestic changes" -U 3 /rom/etc/majestic.yaml /etc/majestic.yaml
+	if [ -f /etc/streamer.yaml ]; then
+		cat /etc/streamer.yaml
+	elif [ -f /rom/etc/majestic.yaml ]; then
+		diff -L "Majestic changes" -U 3 /rom/etc/majestic.yaml /etc/majestic.yaml
+	fi
 }
 
 show_fullname() {
 	soc=$(fw_printenv -n soc | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9]//g')
 	sensor=$(fw_printenv -n sensor | tr 'A-Z' 'a-z' | sed -e 's/_.*$//' -e 's/[^a-z0-9]//g')
-	echo "${soc}${sensor:+-$sensor}"
+	echo "lumi-${soc}${sensor:+-$sensor}"
 }
 
 show_help() {
@@ -81,19 +92,11 @@ show_modules() {
 			done
 		fi
 		echo
-	done
+		done
 }
 
 show_wlan() {
 	grep -r '$1..=' /etc/wireless | cut -d '"' -f4 | sort | grep -e "$(fw_printenv -n soc)" -e generic
-}
-
-legacy_webui() {
-	curl -s -L https://github.com/openipc/webui/raw/master/files/usr/sbin/updatewebui.sh -o /tmp/webui.sh && sh /tmp/webui.sh
-}
-
-majestic_webui() {
-	curl -s -L https://raw.githubusercontent.com/openipc/majestic-webui/master/sbin/updatewebui -o /tmp/webui.sh && sh /tmp/webui.sh
 }
 
 # Source configuration files from /etc/profile.d

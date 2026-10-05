@@ -1,4 +1,5 @@
 buildroot-*/
+/dl/
 output/
 buildroot-*
 .DS_Store

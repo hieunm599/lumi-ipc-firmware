@@ -1,5 +1,6 @@
 config BR2_PACKAGE_AIC8800_OPENIPC
-	bool "aic8800-openipc"
+	bool "OpenIPC AIC8800 USB Wi-Fi driver"
 	depends on BR2_LINUX_KERNEL
 	help
-	  AIC8800 wireless driver
+	  USB driver for AIC8800 devices, including the D80 combo module.
+	  Firmware blobs are supplied separately by the local board integration.

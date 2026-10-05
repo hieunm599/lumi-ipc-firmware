@@ -1,0 +1,4 @@
+#!/bin/sh
+# This board's matching dual-sensor stack is loaded by S35board.
+# Never run sinfo/load_ingenic here: the generic detector misidentifies OS02N10.
+exit 0

@@ -207,6 +207,11 @@ case "$CMD" in
 		;;
 
 	ipctool)
+		# Use an embedded architecture-matched binary when available; otherwise
+		# retain the remote plugin behavior on other targets.
+		if [ -x /usr/bin/ipctool ]; then
+			exec /usr/bin/ipctool "$@"
+		fi
 		IPCTOOL=/tmp/ipctool
 		if [ ! -x $IPCTOOL ]; then
 			curl -s -L -f -o $IPCTOOL https://github.com/OpenIPC/ipctool/releases/download/latest/ipctool"$ARC"

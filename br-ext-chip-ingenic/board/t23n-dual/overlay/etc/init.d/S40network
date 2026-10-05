@@ -1,0 +1,18 @@
+#!/bin/sh
+# No Ethernet PHY on this board. Credentials remain outside the read-only image.
+case "$1" in
+	start)
+		ifup lo
+		if [ -d /sys/class/net/wlan0 ] && [ -n "$(fw_printenv -n wlanssid 2>/dev/null)" ]; then
+			ifup wlan0
+		else
+			echo 'Lumi: configure Wi-Fi via UART or the replacement service'
+		fi
+		;;
+	stop)
+		ifdown -f wlan0
+		ifdown lo
+		;;
+	restart|reload) "$0" stop; "$0" start ;;
+	*) echo "Usage: $0 {start|stop|restart}"; exit 1 ;;
+esac

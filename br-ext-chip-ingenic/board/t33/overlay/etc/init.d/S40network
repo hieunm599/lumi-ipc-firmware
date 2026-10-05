@@ -1,0 +1,33 @@
+#!/bin/sh
+
+start() {
+	echo "Starting T33 network..."
+	ifup lo
+	tries=0
+	while [ ! -e /sys/class/net/wlan0 ] && [ "$tries" -lt 15 ]; do
+		sleep 1
+		tries=$((tries + 1))
+	done
+	if [ ! -e /sys/class/net/wlan0 ]; then
+		echo "T33 Wi-Fi interface wlan0 did not appear; inspect USB/module logs" >&2
+		return 0
+	fi
+	ip link set wlan0 up || echo "T33: failed to bring wlan0 up" >&2
+	ssid=$(fw_printenv -n wlanssid 2>/dev/null || true)
+	if [ -n "$ssid" ]; then
+		ifup wlan0 || echo "T33: ifup wlan0 failed; inspect Wi-Fi credentials and logs" >&2
+	else
+		echo "T33 Wi-Fi ready for scan/configuration; set wlanssid and wlanpass"
+	fi
+}
+
+stop() {
+	ifdown -f wlan0
+	ifdown lo
+}
+
+case "$1" in
+	start|stop) "$1" ;;
+	restart|reload) stop; start ;;
+	*) echo "Usage: $0 {start|stop|restart|reload}" >&2; exit 1 ;;
+esac

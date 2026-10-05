@@ -4,6 +4,7 @@ BR_LINK = https://github.com/buildroot/buildroot/archive
 BR_FILE = /tmp/buildroot-$(BR_VER).tar.gz
 BR_CONF = $(TARGET)/openipc_defconfig
 TARGET ?= $(PWD)/output
+FIRMWARE_PREFIX ?= lumi-cam
 export CMAKE_POLICY_VERSION_MINIMUM := 3.5
 
 # GCC 15 defaults to -std=gnu23, where an empty parameter list means "takes no
@@ -51,7 +52,7 @@ br-%: defconfig
 defconfig: prepare
 	@echo --- $(or $(CONFIG),$(error variable BOARD not found))
 	@cat $(CONFIG) $(PWD)/general/openipc.fragment > $(BR_CONF)
-	@grep -s '^BR2_GLOBAL_PATCH_DIR=' $(CONFIG) >> $(BR_CONF) || true
+	@grep -sE '^(BR2_GLOBAL_PATCH_DIR|BR2_ROOTFS_OVERLAY|BR2_ROOTFS_POST_BUILD_SCRIPT)=' $(CONFIG) >> $(BR_CONF) || true
 	@$(BR_MAKE) BR2_DEFCONFIG=$(BR_CONF) defconfig
 
 prepare:
@@ -176,6 +177,8 @@ ifeq ($(BR2_OPENIPC_SOC_VENDOR),"rockchip")
 	@$(call PREPARE_REPACK,zboot.img,4096,rootfs.squashfs,8192,nor)
 else ifeq ($(BR2_OPENIPC_FLASH_SIZE),"8")
 	@$(call PREPARE_REPACK,uImage,2048,rootfs.squashfs,5120,nor)
+else ifeq ($(BR2_PACKAGE_LUMI_T23_DUAL_SDK),y)
+	@$(call PREPARE_REPACK,uImage,2048,rootfs.squashfs,5120,nor)
 else
 	@$(call PREPARE_REPACK,uImage,2048,rootfs.squashfs,8192,nor)
 endif
@@ -298,7 +301,7 @@ define REPACK_FIRMWARE
 	$(if $(2),cd $(TARGET)/images && md5sum $(2).$(BR2_OPENIPC_SOC_MODEL) > $(2).$(BR2_OPENIPC_SOC_MODEL).md5sum)
 	$(if $(1),$(eval KERNEL = $(1).$(BR2_OPENIPC_SOC_MODEL) $(1).$(BR2_OPENIPC_SOC_MODEL).md5sum),$(eval KERNEL =))
 	$(if $(2),$(eval ROOTFS = $(2).$(BR2_OPENIPC_SOC_MODEL) $(2).$(BR2_OPENIPC_SOC_MODEL).md5sum),$(eval ROOTFS =))
-	$(eval ARCHIVE = openipc.$(BR2_OPENIPC_SOC_MODEL)-$(3)-$(BR2_OPENIPC_VARIANT).tgz)
+	$(eval ARCHIVE = $(FIRMWARE_PREFIX).$(BR2_OPENIPC_SOC_MODEL)-$(3)-$(BR2_OPENIPC_VARIANT).tgz)
 	cd $(TARGET)/images && tar -czf $(ARCHIVE) $(KERNEL) $(ROOTFS)
 	rm -f $(TARGET)/images/*.md5sum
 endef

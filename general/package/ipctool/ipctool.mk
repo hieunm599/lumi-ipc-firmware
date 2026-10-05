@@ -23,4 +23,14 @@ define IPCTOOL_INSTALL_TARGET_CMDS
 	$(INSTALL) -m 755 -t $(TARGET_DIR)/usr/bin $(@D)/ipcinfo
 endef
 
+# The upstream release binary is a static MIPS32r2/musl build. Embed it on
+# little-endian MIPS targets so ipctool works without fetching a plugin at
+# runtime. Keep the other architectures on the existing download-on-demand path.
+ifeq ($(BR2_mipsel),y)
+define IPCTOOL_INSTALL_MIPS32_CMDS
+	$(INSTALL) -m 755 -D $(IPCTOOL_PKGDIR)/files/ipctool-mips32 $(TARGET_DIR)/usr/bin/ipctool
+endef
+IPCTOOL_POST_INSTALL_TARGET_HOOKS += IPCTOOL_INSTALL_MIPS32_CMDS
+endif
+
 $(eval $(cmake-package))

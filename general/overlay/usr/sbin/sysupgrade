@@ -60,7 +60,7 @@ case "$_plat" in
 		esac
 		;;
 esac
-MANIFEST_URL=${MANIFEST_URL:-https://openipc.github.io/${_manifest_repo}/manifest.flat}
+MANIFEST_URL=${MANIFEST_URL:-${LUMI_MANIFEST_URL:-}}
 MANIFEST_CACHE=/tmp/manifest.flat
 unset _osr _plat _manifest_repo
 # Every online fetch verifies the server's certificate against the bundle the
@@ -500,7 +500,8 @@ download_firmware() {
 			[ -z "$url" ] && die "No artifact for $platform in $build_id"
 			echo "Resolved $build_id for $platform"
 		fi
-		[ -z "$url" ] && url=$(fw_printenv -n upgrade || echo "https://github.com/OpenIPC/${repo:-builder}/releases/download/latest/openipc.$build.tgz")
+		[ -z "$url" ] && url=$(fw_printenv -n upgrade 2>/dev/null || echo "")
+		[ -z "$url" ] && die "No upgrade URL provided. Set 'upgrade' in U-Boot env or pass URL/file directly."
 		echo "Download from $url"
 		probe_url "$url"
 		# Show a transfer bar so the (silent, up-to-2-min) download doesn't look
@@ -928,9 +929,10 @@ self_update() {
 		# --insecure, say) is removed first, so a failed fetch cannot fall
 		# through to it. Removing the file the running shell may itself have
 		# been exec'd from is fine -- it keeps reading the unlinked inode.
+		[ -z "$LUMI_SYSUPGRADE_URL" ] && return 0
 		rm -f /tmp/sysupgrade /tmp/sysupgrade.part
 		if curl -s -f -L --proto =https --proto-redir =https $curl_insecure -o /tmp/sysupgrade.part \
-			"https://raw.githubusercontent.com/OpenIPC/firmware/master/general/overlay/usr/sbin/sysupgrade" \
+			"$LUMI_SYSUPGRADE_URL" \
 			&& mv /tmp/sysupgrade.part /tmp/sysupgrade \
 			&& grep -q "#!/bin/sh" /tmp/sysupgrade; then
 			dstv=$(grep scr_version /tmp/sysupgrade | head -1 | cut -f 2 -d '=')
@@ -991,7 +993,11 @@ create_lock() {
 }
 
 get_device() {
-	echo -n "/dev/$(grep "\"$1\"" /proc/mtd | cut -d: -f1)"
+	local name="$1"
+	# PRJ008 names its squashfs MTD partition "root"; sysupgrade calls it
+	# "rootfs". Keep the standard callers and resolve that board alias here.
+	[ "$name" = "rootfs" ] && name="root"
+	echo -n "/dev/$(grep "\"$name\"" /proc/mtd | cut -d: -f1)"
 }
 
 # Record that a write is about to land on flash that backs the RUNNING
@@ -1091,7 +1097,7 @@ syslog_remote_set() {
 
 print_sysinfo() {
 	get_system_info
-	echo_c 33 "OpenIPC System Updater v$scr_version"
+	echo_c 33 "Lumi Camera System Updater v$scr_version"
 	echo_c 36 "\nVendor\t$vendor\nSoC\t$soc\nModel\t$model\nKernel\t$kernel_version\nRootFS\t$system_version"
 }
 

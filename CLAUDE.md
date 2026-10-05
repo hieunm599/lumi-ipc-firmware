@@ -207,7 +207,18 @@ changes image bytes — `build.yml` sets `BUILD_ID` and `BUILD_SHA`, which land 
 `/usr/lib/os-release` in every rootfs. And the post-build machinery under `general/scripts/`
 rewrites every rootfs the tree builds.
 
-### First boot: the camera ships unclaimed
+### Lumi fork: shared fixed login
+
+At the owner's explicit request, Lumi's shared `general/overlay/etc/passwd` and
+`shadow` now provide root with `/bin/sh` and a salted SHA-512-crypt password hash.
+No per-board login hook or first-login password change is used. This is a shared
+development credential, not a production security improvement. `rootfs_script.sh`
+enforces shadow mode 0600 and refuses Majestic-enabled or contaminated images:
+Lumi uses its own streamer and must not bypass Majestic's human EULA acceptance.
+Other inherited presets must disable Majestic before building Lumi firmware.
+Existing writable overlays can retain their previous account settings on upgrade.
+
+### Upstream first-boot design (reference, not Lumi's default)
 
 `general/overlay/etc/shadow` gives root an **empty hash field**, not a password. A password
 committed to a public repository is not a credential, and the first-boot journey it produced

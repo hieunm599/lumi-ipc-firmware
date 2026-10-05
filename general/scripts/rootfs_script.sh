@@ -1,9 +1,23 @@
 #!/bin/bash
+# Lumi's shared account is preconfigured, so licensed Majestic presets must
+# not silently bypass their human-owner claim/EULA flow. Lumi uses its own streamer.
+if grep -q '^BR2_PACKAGE_MAJESTIC=y$' "${BR2_CONFIG}" ||
+   [ -e "${TARGET_DIR}/usr/bin/majestic" ] ||
+   [ -d "${TARGET_DIR}/usr/share/openipc/eula" ]; then
+	echo 'Lumi fixed-login firmware requires Majestic disabled; use a clean target when switching presets.' >&2
+	exit 1
+fi
+# Git does not preserve restrictive read permissions; enforce them in the image.
+chmod 600 "${TARGET_DIR}/etc/shadow" || exit 1
 DATE=$(date +%y.%m.%d)
 FILE=${TARGET_DIR}/usr/lib/os-release
 LATE_OVERLAY_LIST="${BR2_EXTERNAL_GENERAL_PATH}/scripts/late-overlays.list"
 LATE_POST_BUILD_HOOKS="${BR2_EXTERNAL_GENERAL_PATH}/scripts/late-post-build-hooks.list"
 
+echo NAME=\"Lumi Camera OS\" >> ${FILE}
+echo ID=lumi_cam >> ${FILE}
+echo PRETTY_NAME=\"Lumi Camera OS ${DATE:0:1}.${DATE:1}\" >> ${FILE}
+echo LUMI_VERSION=${DATE:0:1}.${DATE:1} >> ${FILE}
 echo OPENIPC_VERSION=${DATE:0:1}.${DATE:1} >> ${FILE}
 date +GITHUB_VERSION="\"${GIT_BRANCH-local}+${GIT_HASH-build}, %Y-%m-%d"\" >> ${FILE}
 echo BUILD_OPTION=${OPENIPC_VARIANT} >> ${FILE}

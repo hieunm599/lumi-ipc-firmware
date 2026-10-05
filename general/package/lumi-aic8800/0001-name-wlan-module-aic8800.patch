@@ -1,0 +1,12 @@
+From: Lumi firmware maintainers
+Subject: [PATCH] name the WLAN module aic8800 to match the board loader
+
+The source keeps its upstream directory name; the loadable module uses the
+board report's name. Do not override MODULE_NAME globally: the loader module
+must retain aic_load_fw.
+
+--- a/USB/driver_fw/drivers/aic8800/aic8800_fdrv/Makefile
++++ b/USB/driver_fw/drivers/aic8800/aic8800_fdrv/Makefile
+@@ -8 +8 @@
+-MODULE_NAME = aic8800_fdrv
++MODULE_NAME = aic8800

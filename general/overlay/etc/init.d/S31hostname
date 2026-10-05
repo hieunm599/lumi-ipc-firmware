@@ -26,13 +26,13 @@ start() {
 	# with the full name, so retry next boot once it has been written to env.
 	[ -n "$sensor" ] || return 0
 
-	name="$soc-$sensor"
+	name="lumi-$soc-$sensor"
 
 	# A user who already renamed the box wins: freeze without renaming, but keep
 	# /etc/hosts consistent with the name they chose.
 	cur=$(cat /etc/hostname 2>/dev/null)
 	case "$cur" in
-		openipc-*|"$soc"|"") ;;
+		lumi-*|openipc-*|"$soc"|"") ;;
 		*) sync_hosts "$cur"; touch "$MARK"; return 0 ;;
 	esac
 

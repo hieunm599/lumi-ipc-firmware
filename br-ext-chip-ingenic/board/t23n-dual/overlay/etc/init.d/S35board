@@ -1,0 +1,36 @@
+#!/bin/sh
+# Fixed T23N dual OS02N10 board. Only drive pins supported by the board report.
+case "$1" in
+	start)
+		echo 'Loading Lumi T23N dual-camera board...'
+		if gpio clear 62; then
+			sleep 1
+			modprobe cfg80211 && modprobe aic_load_fw && modprobe aic8800 \
+				|| echo 'Lumi: Wi-Fi module load failed' >&2
+		else
+			echo 'Lumi: Wi-Fi GPIO62 enable failed' >&2
+		fi
+		if modprobe tx-isp-t23 direct_mode=0 isp_memopt=1 print_level=1 isp_clk=200000000; then
+			modprobe sensor_os02n10s0_t23 rst_gpio=18 pwdn_gpio=-1 default_boot=0 fsync_mode=3 \
+				|| echo 'Lumi: sensor 0 module load failed' >&2
+			modprobe sensor_os02n10s1_t23 rst_gpio=-1 pwdn_gpio=-1 default_boot=0 fsync_mode=3 \
+				|| echo 'Lumi: sensor 1 module load failed' >&2
+			if ! grep -q '200000000' /proc/jz/clock/cgu_isp/rate; then
+				echo 'Lumi: ISP clock is not 200 MHz; inspect before streaming' >&2
+			fi
+		else
+			echo 'Lumi: ISP module load failed' >&2
+		fi
+		# MMC0 uses the kernel's PB/4-bit platform data. GPIO60 power is
+		# unverified, so leave it untouched; likewise audio, LED, keys and PTZ.
+		modprobe jzmmc_v12 || echo 'Lumi: MMC0 module load failed' >&2
+		count=0
+		while [ ! -d /sys/class/net/wlan0 ] && [ "$count" -lt 10 ]; do
+			sleep 1
+			count=$((count + 1))
+		done
+		[ -d /sys/class/net/wlan0 ] || echo 'Lumi: wlan0 did not appear; inspect USB/firmware logs' >&2
+		;;
+	stop) ;;
+	*) echo "Usage: $0 {start|stop}"; exit 1 ;;
+esac
