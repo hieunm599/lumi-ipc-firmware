@@ -35,11 +35,10 @@ case "$1" in
 			insmod "$MODULE_DIR/sensor_sc4336_PRJ008.ko" \
 				|| { echo 'T33gs: SC4336 load failed; inspect I2C and dmesg' >&2; exit 1; }
 		fi
-		AUDIO_MODULE_DIR="/lib/modules/$(uname -r)/ingenic"
-		if [ -f "$AUDIO_MODULE_DIR/audio.ko" ] && ! lsmod | grep -q '^audio'; then
+		if [ -f "$MODULE_DIR/audio.ko" ] && ! lsmod | grep -q '^audio'; then
 			# Keep codec GPIO control disabled until package pin 52 is mapped
 			# to a Linux GPIO offset; the board signal is active high.
-			insmod "$AUDIO_MODULE_DIR/audio.ko" spk_gpio=-1 \
+			insmod "$MODULE_DIR/audio.ko" spk_gpio=-1 \
 				|| echo 'T33gs: OSS3 microphone driver failed; inspect dmesg' >&2
 		fi
 		;;

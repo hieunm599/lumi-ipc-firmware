@@ -44,10 +44,7 @@ MODULE_DIR="$TARGET_DIR/lib/modules/3.10.14/ingenic"
 install -d "$MODULE_DIR"
 install -m 0644 "$ISP_DIR/tx-isp-PRJ008.ko" "$MODULE_DIR/"
 install -m 0644 "$SENSOR_DIR/sensor_sc4336_PRJ008.ko" "$MODULE_DIR/"
-KERNEL_RELEASE=$(make -s -C "$KDIR" ARCH=mips CROSS_COMPILE="$TOOLCHAIN" kernelrelease)
-AUDIO_MODULE_DIR="$TARGET_DIR/lib/modules/$KERNEL_RELEASE/ingenic"
-install -d "$AUDIO_MODULE_DIR"
-install -m 0644 "$AUDIO_DIR/audio.ko" "$AUDIO_MODULE_DIR/"
+install -m 0644 "$AUDIO_DIR/audio.ko" "$MODULE_DIR/"
 
 # Build an SDK-uClibc probe using the registration sequence from the SDK sample.
 SDK_INCLUDE="$SDK_WORK/vendor-media/include"
