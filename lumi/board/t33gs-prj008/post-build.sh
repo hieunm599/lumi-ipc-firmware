@@ -11,6 +11,11 @@ ISP_DIR="$DRIVER_SOURCE/isp/tx-isp"
 SENSOR_DIR="$DRIVER_SOURCE/sensors/sc4336"
 AUDIO_DIR="$DRIVER_SOURCE/audio/oss3"
 
+if [ -f "$TARGET_DIR/etc/hardware.env" ]; then
+	echo "T33 post-build: components already installed by lumi-osdrv-t33 package"
+	exit 0
+fi
+
 if [ ! -f "$KDIR/.config" ] || [ ! -f "$ISP_DIR/Makefile" ] || [ ! -f "$SENSOR_DIR/PRJ008/sc4336.c" ]; then
 	echo "T33 post-build: missing kernel configuration or staged SDK driver source" >&2
 	exit 1

@@ -1,4 +1,5 @@
 menu "Lumi packages"
 source "$BR2_EXTERNAL_LUMI_PATH/package/lumi-aic8800/Config.in"
+source "$BR2_EXTERNAL_LUMI_PATH/package/lumi-osdrv-t33/Config.in"
 source "$BR2_EXTERNAL_LUMI_PATH/package/lumi-t23-dual-sdk/Config.in"
 endmenu

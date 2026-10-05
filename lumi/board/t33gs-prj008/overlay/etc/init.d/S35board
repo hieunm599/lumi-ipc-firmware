@@ -1,45 +1,49 @@
 #!/bin/sh
-# Experimental PRJ008 media bring-up for the T33gs SK032T4/SC4336 camera.
-# Uses only SDK-sourced TX-ISP and the SC4336 source staged for PRJ008.
+# Generic board peripheral bring-up for Lumi Ingenic T33 cameras.
+
+[ -f /etc/hardware.env ] && . /etc/hardware.env
 
 case "$1" in
 	start)
-		# The camera uses an AIC8800D80 USB combo module. The original board
-		# power-cycles it through GPIO72 before loading the USB drivers.
-		if [ -e /sys/class/gpio/export ]; then
-			[ -d /sys/class/gpio/gpio72 ] || echo 72 > /sys/class/gpio/export 2>/dev/null || true
-			if [ -d /sys/class/gpio/gpio72 ]; then
-				echo out > /sys/class/gpio/gpio72/direction
-				echo 1 > /sys/class/gpio/gpio72/value
+		# 1. Power-cycle Wi-Fi module if configured
+		if [ -n "$WIFI_PWR_GPIO" ] && [ -e /sys/class/gpio/export ]; then
+			[ -d "/sys/class/gpio/gpio${WIFI_PWR_GPIO}" ] || echo "$WIFI_PWR_GPIO" > /sys/class/gpio/export 2>/dev/null || true
+			if [ -d "/sys/class/gpio/gpio${WIFI_PWR_GPIO}" ]; then
+				echo out > "/sys/class/gpio/gpio${WIFI_PWR_GPIO}/direction"
+				echo 1 > "/sys/class/gpio/gpio${WIFI_PWR_GPIO}/value"
 				sleep 0.5
-				echo 0 > /sys/class/gpio/gpio72/value
+				echo 0 > "/sys/class/gpio/gpio${WIFI_PWR_GPIO}/value"
 			fi
 		fi
-		modprobe aic_load_fw aic_fw_path=/lib/firmware aicwf_dbg_level=1 \
-			|| echo 'T33gs: AIC firmware loader module failed' >&2
-		modprobe aic8800 aicwf_dbg_level=1 \
-			|| echo 'T33gs: AIC8800D80 Wi-Fi module failed' >&2
-		MODULE_DIR=/lib/modules/3.10.14/ingenic
-		if [ ! -f "$MODULE_DIR/tx-isp-PRJ008.ko" ] || [ ! -f "$MODULE_DIR/sensor_sc4336_PRJ008.ko" ]; then
-			echo 'T33gs: PRJ008 ISP/sensor modules are missing' >&2
-			exit 1
+
+		# 2. Load Wi-Fi drivers (if present)
+		if [ -f /lib/modules/3.10.14/aic8800.ko ] || modinfo aic8800 >/dev/null 2>&1; then
+			modprobe aic_load_fw aic_fw_path=/lib/firmware aicwf_dbg_level=1 2>/dev/null || true
+			modprobe aic8800 aicwf_dbg_level=1 2>/dev/null || true
 		fi
-		if ! lsmod | grep -q '^tx_isp'; then
-			insmod "$MODULE_DIR/tx-isp-PRJ008.ko" \
+
+		# 3. Load TX-ISP module
+		MODULE_DIR=/lib/modules/3.10.14/ingenic
+		ISP_MOD="${ISP_MODULE:-tx-isp-${SOC_PROJECT:-PRJ008}.ko}"
+		if [ -f "$MODULE_DIR/$ISP_MOD" ] && ! lsmod | grep -q '^tx_isp'; then
+			insmod "$MODULE_DIR/$ISP_MOD" \
 				clk_name=sclka isp_clk=380000000 \
 				clka_name=sclka isp_clka=500000000 \
 				clkv_name=sclka isp_clkv=380000000 \
-				|| { echo 'T33gs: TX-ISP load failed; inspect dmesg' >&2; exit 1; }
+				|| echo "Lumi T33: TX-ISP load failed; inspect dmesg" >&2
 		fi
-		if ! lsmod | grep -q '^sensor_sc4336'; then
-			insmod "$MODULE_DIR/sensor_sc4336_PRJ008.ko" \
-				|| { echo 'T33gs: SC4336 load failed; inspect I2C and dmesg' >&2; exit 1; }
+
+		# 4. Load Sensor module
+		SNS_MOD="${SENSOR_MODULE:-sensor_${SENSOR_MODEL:-sc4336}_${SOC_PROJECT:-PRJ008}.ko}"
+		if [ -f "$MODULE_DIR/$SNS_MOD" ] && ! lsmod | grep -q '^sensor_'; then
+			insmod "$MODULE_DIR/$SNS_MOD" \
+				|| echo "Lumi T33: Sensor $SNS_MOD load failed; inspect I2C and dmesg" >&2
 		fi
+
+		# 5. Load Audio OSS3 module (if present)
 		if [ -f "$MODULE_DIR/audio.ko" ] && ! lsmod | grep -q '^audio'; then
-			# Keep codec GPIO control disabled until package pin 52 is mapped
-			# to a Linux GPIO offset; the board signal is active high.
 			insmod "$MODULE_DIR/audio.ko" spk_gpio=-1 \
-				|| echo 'T33gs: OSS3 microphone driver failed; inspect dmesg' >&2
+				|| echo 'Lumi T33: OSS3 audio driver failed; inspect dmesg' >&2
 		fi
 		;;
 	stop)

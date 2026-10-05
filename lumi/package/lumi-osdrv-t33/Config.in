@@ -1,0 +1,42 @@
+config BR2_PACKAGE_LUMI_OSDRV_T33
+	bool "Lumi Ingenic T33 OSDRV (ISP, Sensor, Audio, libimp)"
+	depends on BR2_LINUX_KERNEL
+	default y if BR2_OPENIPC_SOC_MODEL = "t33"
+	help
+	  Ingenic T32/T33 camera driver stack and media runtime.
+	  Includes TX-ISP kernel module, image sensor driver,
+	  OSS3 audio driver, and isolated uClibc libimp runtime.
+
+if BR2_PACKAGE_LUMI_OSDRV_T33
+
+config BR2_LUMI_T33_SOC_PROJECT
+	string "Ingenic SoC Project Identifier"
+	default "PRJ008"
+	help
+	  Ingenic T33 chip configuration project ID (e.g. PRJ008 for T33gs).
+
+config BR2_LUMI_T33_SNS_MODEL
+	string "Image sensor model"
+	default "sc4336"
+	help
+	  Sensor model name (e.g. sc4336, gc4653, sc2336).
+
+config BR2_LUMI_T33_WIFI_PWR_GPIO
+	string "Wi-Fi Power / Reset GPIO pin"
+	default "72"
+	help
+	  GPIO pin used to cycle power or reset the Wi-Fi module.
+
+config BR2_LUMI_T33_IRCUT_PIN_A
+	string "IR-Cut Pin A (BIN) GPIO"
+	default "66"
+	help
+	  Linux GPIO offset for IR-Cut filter direction line A.
+
+config BR2_LUMI_T33_IRCUT_PIN_B
+	string "IR-Cut Pin B (AIN) GPIO"
+	default "67"
+	help
+	  Linux GPIO offset for IR-Cut filter direction line B.
+
+endif
