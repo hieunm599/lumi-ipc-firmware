@@ -2,7 +2,7 @@
 set -euo pipefail
 
 BINARIES_DIR="$1"
-FW_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+FW_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 REPO_ROOT="$(cd "$FW_ROOT/.." && pwd)"
 
 UBOOT_BIN="${BINARIES_DIR}/u-boot-with-spl.bin"
@@ -26,7 +26,7 @@ if [ ! -f "$UBOOT_BIN" ] || [ ! -f "$KERNEL_BIN" ] || [ ! -f "$ROOTFS_BIN" ]; th
     exit 0
 fi
 
-OUTPUT_IMAGE="${BINARIES_DIR}/openipc-t33-prj008n-nor-16m.bin"
+OUTPUT_IMAGE="${BINARIES_DIR}/lumi-t33-prj008n-nor-16m.bin"
 rm -f "$OUTPUT_IMAGE"
 
 echo "Packing 16MB SPI-NOR image for Ingenic T33..."

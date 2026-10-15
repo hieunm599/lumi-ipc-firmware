@@ -1,0 +1,30 @@
+#!/bin/sh
+# Keep T33gs ULN inputs inactive and release them to the motor controller.
+[ -e /sys/class/gpio/export ] || exit 1
+
+# Leave the motor inputs low, then release GPIO ownership to the
+# motor controller. Do not touch pins already claimed through sysfs.
+motor_result=0
+for motor_gpio in 38 39 40 41 42 43 45 46; do
+	motor_path="/sys/class/gpio/gpio${motor_gpio}"
+	if [ -d "$motor_path" ]; then
+		echo "Lumi T33gs: motor GPIO $motor_gpio already exported; skipped" >&2
+		continue
+	fi
+	if ! echo "$motor_gpio" > /sys/class/gpio/export; then
+		echo "Lumi T33gs: motor GPIO $motor_gpio unavailable" >&2
+		motor_result=1
+		continue
+	fi
+	if echo low > "$motor_path/direction" &&
+		[ "$(cat "$motor_path/value")" = 0 ]; then
+		if ! echo "$motor_gpio" > /sys/class/gpio/unexport; then
+			echo "Lumi T33gs: cannot release motor GPIO $motor_gpio" >&2
+			motor_result=1
+		fi
+	else
+		echo "Lumi T33gs: motor GPIO $motor_gpio low check failed; retained" >&2
+		motor_result=1
+	fi
+done
+exit "$motor_result"

@@ -1,7 +1,7 @@
 #!/bin/sh
 
 # Keep boot moving while the runtime waits for wlan0 DHCP.
-START=/overlay/lumi-ipc-streamer/start-streamer
+START=/etc/init.d/S60lumi-streamer
 if [ -x "$START" ]; then
 	"$START" start </dev/null >/dev/null 2>&1 &
 fi

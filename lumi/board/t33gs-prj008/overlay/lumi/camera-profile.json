@@ -1,0 +1,66 @@
+{
+  "version": 1,
+  "model": "lumi-t33gs-prj008-sc4336",
+  "vendor": "ingenic",
+  "soc": "t33",
+  "sensor": "sc4336",
+  "flash": "nor",
+  "hardware": {
+    "ptz": true,
+    "osd": true,
+    "snapshot": true,
+    "rtsp": true,
+    "connectivity": true,
+    "relay": true
+  },
+  "defaults": {
+    "generation": 0,
+    "camera_name": "lumi",
+    "stream_enabled": true,
+    "audio_capture_enabled": false,
+    "talkback_enabled": false,
+    "recording": {
+      "mode": "off",
+      "segment_seconds": 60,
+      "pre_event_seconds": 10,
+      "post_event_seconds": 20,
+      "prebuffer_bytes": 4194304,
+      "quota_bytes": 1073741824,
+      "audio_enabled": false
+    },
+    "modules": {
+      "ptz": true,
+      "osd": true,
+      "snapshot": true,
+      "rtsp": true,
+      "connectivity": true,
+      "relay": true
+    },
+    "connectors": {
+      "p2p": {
+        "P2P_HTTP_BIND": "127.0.0.1:8080",
+        "P2P_RTSP_PORT": "18554",
+        "P2P_RTSP_PATH": "/main",
+        "P2P_RTSP_WIDTH": "2560",
+        "P2P_RTSP_HEIGHT": "1440",
+        "P2P_RTSP_FPS": "25",
+        "P2P_MAX_VIEWERS": "5",
+        "P2P_H264_PROFILE": "profile-level-id=4d4032;packetization-mode=1;level-asymmetry-allowed=1"
+      },
+      "relay": {
+        "RUST_LOG": "info",
+        "CONNECTOR_PROTOCOL": "quic",
+        "SERVER_LIST_ENDPOINTS": "https://api-storage-staging.gofa.vn/relay-cloud/staging/hc/app.txt",
+        "HTTP_DEST": "127.0.0.1:18080",
+        "HTTPS_DEST": "127.0.0.1:8443",
+        "RTSP_DEST": "auto",
+        "RTSPS_DEST": "127.0.0.1:18555",
+        "FORWARD_ADDR": "127.0.0.1:10000",
+        "TOP_Q_SELECT": "5",
+        "ROUTE_TICK": "300",
+        "ENABLE_REROUTE": "true",
+        "ALLOW_QUIC_INSECURE": "false"
+      }
+    }
+  }
+}

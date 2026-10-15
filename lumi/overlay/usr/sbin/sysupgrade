@@ -223,7 +223,11 @@ verify_rootfs() {
 	if mkdir -p "$y" && loop=$(losetup -f) && err=$(losetup "$loop" "$x" 2>&1) \
 		&& err=$(mount_rootfs "$loop" "$y"); then
 		rootfs_version=$(get_system_version "$y")
-		check_soc "$(head -1 $y/etc/hostname | cut -d- -f2)"
+		# Lumi uses a product hostname, so the build stamp owns image identity.
+		local image_model
+		image_model=$(grep '^BUILD_PLATFORM=' "$y/etc/os-release" | cut -d= -f2 | cut -d_ -f1)
+		[ -n "$image_model" ] || image_model=$(head -1 "$y/etc/hostname" | cut -d- -f2)
+		check_soc "$image_model"
 		compare_versions "$system_version" "$rootfs_version" && exit_update=1
 		umount "$y"
 	else
@@ -1037,7 +1041,11 @@ get_kernel_version() {
 }
 
 get_system_info() {
-	vendor=$(ipcinfo -v)
+	if [ -r /lumi/camera-profile.json ] && [ -x /lumi/bin/lumi-config ]; then
+		vendor=$(/lumi/bin/lumi-config identity /lumi/camera-profile.json vendor) || die "Invalid Lumi hardware profile"
+	else
+		vendor=$(ipcinfo -v)
+	fi
 	# Upgrade identity is the BUILD platform, not the chip. BUILD_PLATFORM is
 	# ${soc}_${variant}[_${device}]; the SoC model is its leading token (no
 	# SOC_MODEL contains '_'). This decouples one published image (e.g. the
@@ -1054,7 +1062,13 @@ get_system_info() {
 	[ "$kernel_device" = "/dev/" ] && kernel_device=$(get_device "firmware")
 	kernel_version=$(get_kernel_version "$kernel_device")
 	system_version=$(get_system_version "")
-	flash_type=$(ipcinfo -F)
+	if [ -r /lumi/camera-profile.json ] && [ -x /lumi/bin/lumi-config ]; then
+		profile_soc=$(/lumi/bin/lumi-config identity /lumi/camera-profile.json soc) || die "Invalid Lumi SoC profile"
+		[ "$model" = "$profile_soc" ] || die "Running build/profile SoC mismatch"
+		flash_type=$(/lumi/bin/lumi-config identity /lumi/camera-profile.json flash) || die "Invalid Lumi flash profile"
+	else
+		flash_type=$(ipcinfo -F)
+	fi
 	# 1 when the running filesystem is served from the flash this run may
 	# rewrite. init(1) mounts the rw overlay from "rootfs_data" and pivots onto
 	# the squashfs the kernel booted from, so on a flash root BOTH partitions

@@ -1,4 +1,4 @@
-export PATH="/bin:/sbin:/usr/bin:/usr/sbin:/tmp"
+export PATH="/lumi/bin:/bin:/sbin:/usr/bin:/usr/sbin:/tmp"
 export EDITOR="/bin/vi"
 export HOME="/root"
 export SENSOR=$(fw_printenv -n sensor)
@@ -13,7 +13,7 @@ echo_c() {
 
 if [ "$PS1" ]; then
 	[ -f /etc/os-release ] && . /etc/os-release
-	[ -f /etc/openipc_banner ] && echo_c 34 "\n$(cat /etc/openipc_banner)\n"
+	[ -f /etc/lumi_banner ] && echo_c 34 "\n$(cat /etc/lumi_banner)\n"
 	[ -n "$GITHUB_VERSION" ] && echo_c 32 "$(printf %51s "$GITHUB_VERSION")\n"
 	if [ "$(id -u)" -eq 0 ]; then
 		export PS1='\u@\h:\w\# '
@@ -31,7 +31,9 @@ network() {
 }
 
 streamer() {
-	if [ -x /etc/init.d/S60streamer ]; then
+	if [ -x /etc/init.d/S60lumi-streamer ]; then
+		/etc/init.d/S60lumi-streamer "$1"
+	elif [ -x /etc/init.d/S60streamer ]; then
 		/etc/init.d/S60streamer "$1"
 	elif [ -x /etc/init.d/S95lumi-streamer ]; then
 		/etc/init.d/S95lumi-streamer "$1"
@@ -43,16 +45,13 @@ streamer() {
 }
 
 set_fullname() {
-	name=$(show_fullname)
-	[ -n "$name" ] || return 1
-	echo "$name" > /etc/hostname
-	hostname -F /etc/hostname
-	sed -i '/^127\.0\.1\.1/d' /etc/hosts 2>/dev/null
-	printf '127.0.1.1\t%s\n' "$name" >> /etc/hosts
+	hostname lumi
 }
 
 show_config() {
-	if [ -f /etc/streamer.yaml ]; then
+	if [ -f /overlay/config.json ]; then
+		cat /overlay/config.json
+	elif [ -f /etc/streamer.yaml ]; then
 		cat /etc/streamer.yaml
 	elif [ -f /rom/etc/majestic.yaml ]; then
 		diff -L "Majestic changes" -U 3 /rom/etc/majestic.yaml /etc/majestic.yaml
@@ -60,9 +59,7 @@ show_config() {
 }
 
 show_fullname() {
-	soc=$(fw_printenv -n soc | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9]//g')
-	sensor=$(fw_printenv -n sensor | tr 'A-Z' 'a-z' | sed -e 's/_.*$//' -e 's/[^a-z0-9]//g')
-	echo "lumi-${soc}${sensor:+-$sensor}"
+	echo lumi
 }
 
 show_help() {

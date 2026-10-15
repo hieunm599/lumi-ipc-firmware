@@ -4,14 +4,11 @@ NAME="lumi-ipc-streamer-watch"
 PIDFILE="/var/run/$NAME.pid"
 STREAMER_INIT="/etc/init.d/S60lumi-streamer"
 STREAMER_PIDFILE="/var/run/lumi-ipc-streamer.pid"
-STREAMER_BIN="/overlay/lumi-ipc-streamer/bin/ipc-stream-supervisor"
-P2P_INIT="/overlay/lumi-ipc-streamer/bin/lumi-t33gs-p2p"
-P2P_CONFIG="/overlay/lumi-ipc-streamer/p2p.conf"
-P2P_PIDFILE="/var/run/lumi-t33gs-p2p.pid"
-RELAY_INIT="/overlay/lumi-ipc-streamer/bin/lumi-t33gs-relay-agent"
-RELAY_CONFIG="/overlay/lumi-ipc-streamer/relay-agent.env"
-RELAY_KEY="/overlay/lumi-ipc-streamer/relay-key.json"
-NETWORK_CONFIG="/overlay/lumi-ipc-streamer/network.env"
+STREAMER_BIN="/lumi/bin/ipc-stream-supervisor"
+RELAY_INIT="/lumi/bin/lumi-t33gs-relay-agent"
+RELAY_CONFIG="/tmp/lumi-relay.env"
+RELAY_KEY="/overlay/relay-key.json"
+NETWORK_CONFIG="/overlay/network.env"
 RELAY_PIDFILE="/var/run/lumi-t33gs-relay-agent.pid"
 
 wlan_ip() {
@@ -41,12 +38,6 @@ streamer_running() {
 	[ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
 }
 
-p2p_running() {
-	[ -s "$P2P_PIDFILE" ] || return 1
-	pid=$(cat "$P2P_PIDFILE")
-	[ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
-}
-
 relay_running() {
 	[ -s "$RELAY_PIDFILE" ] || return 1
 	pid=$(cat "$RELAY_PIDFILE")
@@ -54,27 +45,27 @@ relay_running() {
 }
 
 watch() {
+	[ ! -r /tmp/lumi-boot.env ] || { set -a; . /tmp/lumi-boot.env; set +a; }
 	trap 'exit 0' HUP INT TERM
 	last_ip=""
 	while :; do
+		[ ! -r /tmp/lumi-boot.env ] || { set -a; . /tmp/lumi-boot.env; set +a; }
+		RELAY_KEY="${LUMI_RELAY_KEY:-/overlay/relay-key.json}"
 		current_ip=$(wlan_ip)
 		if [ ! -x "$STREAMER_BIN" ]; then
 			:
 		elif [ -n "$current_ip" ]; then
 			ensure_default_route
-			if ! streamer_running; then
+			if ! streamer_running && [ ! -e /tmp/lumi-runtime.started ]; then
 				"$STREAMER_INIT" start
 			elif [ -n "$last_ip" ] && [ "$current_ip" != "$last_ip" ]; then
-				"$STREAMER_INIT" restart
+				echo "Lumi DHCP changed; media owner retained"
 			fi
-			if streamer_running && [ -x "$P2P_INIT" ] && [ -s "$P2P_CONFIG" ] && ! p2p_running; then
-				"$P2P_INIT" start
-			fi
-			if streamer_running && p2p_running && [ -x "$RELAY_INIT" ] && [ -s "$RELAY_CONFIG" ] && [ -s "$RELAY_KEY" ] && ! relay_running; then
+			if [ "${LUMI_MODULE_RELAY:-0}" = 1 ] && streamer_running && [ -x "$RELAY_INIT" ] && [ -s "$RELAY_CONFIG" ] && [ -s "$RELAY_KEY" ] && ! relay_running; then
 				"$RELAY_INIT" start
 			fi
 		elif streamer_running; then
-			"$STREAMER_INIT" stop
+			: # Wi-Fi loss does not reopen IMP; network sidecars reconnect independently.
 		fi
 		last_ip="$current_ip"
 		sleep 5

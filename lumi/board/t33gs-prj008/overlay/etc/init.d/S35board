@@ -1,10 +1,15 @@
 #!/bin/sh
-# Generic board peripheral bring-up for Lumi Ingenic T33 cameras.
+# Peripheral bring-up for the Lumi T33gs PRJ008 board.
 
 [ -f /etc/hardware.env ] && . /etc/hardware.env
 
 case "$1" in
 	start)
+        if [ "$(/lumi/bin/lumi-config hardware-ptz /lumi/camera-profile.json)" = 1 ]; then
+        /lumi/bin/lumi-t33gs-motor-gpio-init ||
+            echo "Lumi T33gs: motor GPIO preparation failed" >&2
+        fi
+
 		# 1. Power-cycle Wi-Fi module if configured
 		if [ -n "$WIFI_PWR_GPIO" ] && [ -e /sys/class/gpio/export ]; then
 			[ -d "/sys/class/gpio/gpio${WIFI_PWR_GPIO}" ] || echo "$WIFI_PWR_GPIO" > /sys/class/gpio/export 2>/dev/null || true
@@ -17,7 +22,9 @@ case "$1" in
 		fi
 
 		# 2. Load Wi-Fi drivers (if present)
-		if [ -f /lib/modules/3.10.14/aic8800.ko ] || modinfo aic8800 >/dev/null 2>&1; then
+		# kernel-module installs under the full kernel release, not 3.10.14.
+		# This BusyBox build does not provide modinfo.
+		if [ -d "/lib/modules/$(uname -r)/kernel/drivers/net/wireless/aic8800" ]; then
 			modprobe aic_load_fw aic_fw_path=/lib/firmware aicwf_dbg_level=1 2>/dev/null || true
 			modprobe aic8800 aicwf_dbg_level=1 2>/dev/null || true
 		fi
@@ -31,6 +38,11 @@ case "$1" in
 				clka_name=sclka isp_clka=500000000 \
 				clkv_name=sclka isp_clkv=380000000 \
 				|| echo "Lumi T33: TX-ISP load failed; inspect dmesg" >&2
+		fi
+
+		# Source-built TNPU exposes vendor duty counters; preserve current clock/CMA.
+		if [ -f "$MODULE_DIR/tnpu.ko" ] && ! lsmod | grep -q '^tnpu'; then
+			insmod "$MODULE_DIR/tnpu.ko" parent_clk_name=apll tnpu_clk_rate=500000000 cma_pool_size=${TNPU_CMA_POOL_SIZE:-0} || echo "Lumi TNPU load failed" >&2
 		fi
 
 		# 4. Load Sensor module

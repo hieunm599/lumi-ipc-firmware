@@ -5,6 +5,8 @@
 ################################################################################
 
 LUMI_OSDRV_T33_VERSION = 1.0.0
+# Sources are staged from the local SDK by contrib/build-t33.sh.
+LUMI_OSDRV_T33_SOURCE =
 LUMI_OSDRV_T33_DEPENDENCIES = linux
 
 LUMI_OSDRV_T33_SOC_PROJECT = $(call qstrip,$(BR2_LUMI_T33_SOC_PROJECT))
@@ -23,10 +25,26 @@ T33_TOOLCHAIN = $(T33_SDK_WORK)/toolchain/mips-gcc540-uclibc0.9.33.2-r3.3.7.mxu2
 T33_DRIVER_SRC = $(T33_SDK_WORK)/driver-source/drivers
 T33_ISP_SRC = $(T33_DRIVER_SRC)/isp/tx-isp
 T33_AUDIO_SRC = $(T33_DRIVER_SRC)/audio/oss3
+T33_MOTOR_SRC = $(BR2_EXTERNAL_LUMI_PATH)/../../lumi-ipc-linux/kernel/ingenic/t33gs-motor
+T33_TNPU_SRC = $(BR2_EXTERNAL_LUMI_PATH)/../../lumi-ipc-linux/kernel/ingenic/t33gs-tnpu
 T33_SENSOR_SRC = $(T33_DRIVER_SRC)/sensors/$(LUMI_OSDRV_T33_SENSOR)/$(LUMI_OSDRV_T33_SOC_PROJECT)
 
 define LUMI_OSDRV_T33_BUILD_CMDS
 	@echo "--- Building Lumi T33 OSDRV: SOC=$(LUMI_OSDRV_T33_SOC_PROJECT) SENSOR=$(LUMI_OSDRV_T33_SENSOR) ---"
+	# Include the native motor driver without enabling unqualified motion at boot.
+	cmp $(T33_MOTOR_SRC)/lumi_motor_abi.h $(BR2_EXTERNAL_LUMI_PATH)/../../lumi-ipc-streamer/adapters/ipc-ptz/native/lumi_motor_abi.h
+	mkdir -p $(@D)/motor-source
+	cp $(T33_MOTOR_SRC)/Makefile $(T33_MOTOR_SRC)/*.c $(T33_MOTOR_SRC)/*.h $(@D)/motor-source/
+	$(MAKE) -C $(LINUX_DIR) ARCH=mips CROSS_COMPILE="$(T33_TOOLCHAIN)" M="$(@D)/motor-source" modules
+	$(TARGET_CC) $(TARGET_CFLAGS) -std=c99 -Wall -Wextra -Werror \
+		$(TARGET_LDFLAGS) -o $(@D)/t33-riscv-probe \
+		$(BR2_EXTERNAL_LUMI_PATH)/board/t33gs-prj008/t33-riscv-probe.c
+	mkdir -p $(@D)/tnpu-source
+	cp $(T33_TNPU_SRC)/Makefile $(T33_TNPU_SRC)/*.c $(T33_TNPU_SRC)/*.h $(@D)/tnpu-source/
+	$(MAKE) -C $(LINUX_DIR) ARCH=mips CROSS_COMPILE="$(T33_TOOLCHAIN)" M="$(@D)/tnpu-source" modules
+	"$(T33_TOOLCHAIN)gcc" -muclibc -march=mips32r2 -O2 -Wall -Wextra \
+		-I"$(T33_TNPU_SRC)" -Wl,--dynamic-linker=/opt/ingenic-t33/lib/ld-uClibc-0.9.33.2.so \
+		-Wl,-rpath,/opt/ingenic-t33/lib -o $(@D)/utilization $(T33_TNPU_SRC)/vendor-monitor/utilization.c
 	# Build TX-ISP module
 	if [ -f "$(T33_ISP_SRC)/Makefile" ]; then \
 		cp -f "$(T33_SDK_WORK)/lib$(LUMI_OSDRV_T33_SOC_PROJECT)-firmware-310-540.a" \
@@ -72,8 +90,12 @@ define LUMI_OSDRV_T33_BUILD_CMDS
 endef
 
 define LUMI_OSDRV_T33_INSTALL_TARGET_CMDS
+	$(INSTALL) -D -m 755 $(@D)/t33-riscv-probe $(TARGET_DIR)/usr/bin/t33-riscv-probe
+	$(INSTALL) -D -m 755 $(@D)/utilization $(TARGET_DIR)/lumi/bin/utilization
+	$(INSTALL) -D -m 644 $(@D)/tnpu-source/tnpu.ko $(TARGET_DIR)/lib/modules/3.10.14/ingenic/tnpu.ko
 	# 1. Install kernel modules
 	$(INSTALL) -m 755 -d $(TARGET_DIR)/lib/modules/3.10.14/ingenic
+	$(INSTALL) -m 644 $(@D)/motor-source/lumi_motor.ko $(TARGET_DIR)/lib/modules/3.10.14/ingenic/
 	[ -f "$(T33_ISP_SRC)/tx-isp-$(LUMI_OSDRV_T33_SOC_PROJECT).ko" ] && \
 		$(INSTALL) -m 644 "$(T33_ISP_SRC)/tx-isp-$(LUMI_OSDRV_T33_SOC_PROJECT).ko" \
 			$(TARGET_DIR)/lib/modules/3.10.14/ingenic/ || true
@@ -91,10 +113,13 @@ define LUMI_OSDRV_T33_INSTALL_TARGET_CMDS
 	done
 
 	# 3. Install vendor media uClibc runtime and probe binaries
+	# Old aliases may be symlinks: copying SDK XSym files over them would
+	# overwrite the real ELF loader through those links on incremental builds.
+	rm -rf $(TARGET_DIR)/opt/ingenic-t33/lib
 	$(INSTALL) -m 755 -d $(TARGET_DIR)/opt/ingenic-t33/lib
 	if [ -d "$(T33_SDK_WORK)/vendor-media/lib" ]; then \
 		cp -a $(T33_SDK_WORK)/vendor-media/lib/. $(TARGET_DIR)/opt/ingenic-t33/lib/; \
-		python3 $(BR2_EXTERNAL_LUMI_PATH)/board/t33gs-prj008/fix-xsym-links.py $(TARGET_DIR)/opt/ingenic-t33/lib 2>/dev/null || true; \
+		python3 $(BR2_EXTERNAL_LUMI_PATH)/board/t33gs-prj008/fix-xsym-links.py $(TARGET_DIR)/opt/ingenic-t33/lib; \
 	fi
 	[ -f $(@D)/t33-sensor-probe ] && $(INSTALL) -m 755 $(@D)/t33-sensor-probe $(TARGET_DIR)/opt/ingenic-t33/ || true
 	[ -f $(@D)/t33-frame-probe ] && $(INSTALL) -m 755 $(@D)/t33-frame-probe $(TARGET_DIR)/opt/ingenic-t33/ || true

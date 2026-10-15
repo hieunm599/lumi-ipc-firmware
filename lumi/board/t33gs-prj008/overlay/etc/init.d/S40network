@@ -19,6 +19,8 @@ start() {
 	else
 		echo "T33 Wi-Fi ready for scan/configuration; set wlanssid and wlanpass"
 	fi
+	# Continuous camera streams need predictable latency rather than sleep cycles.
+	iw dev wlan0 set power_save off || echo "T33: failed to disable Wi-Fi power saving" >&2
 }
 
 stop() {

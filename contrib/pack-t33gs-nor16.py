@@ -10,7 +10,7 @@ import zlib
 FLASH_SIZE = 16 * 1024 * 1024
 UBOOT = (0x000000, 256 * 1024)
 KERNEL = (0x040000, 2560 * 1024)
-ROOTFS = (0x2C0000, 4096 * 1024)
+ROOTFS = (0x2C0000, 12 * 1024 * 1024)
 ENV_OFFSET = 0xFF8000
 ENV_BLOCK_SIZE = 32 * 1024
 ENV_DATA_SIZE = 16 * 1024
@@ -37,8 +37,8 @@ def make_environment(memory_args: str) -> bytes:
 		"bootargs": (
 			f"console=ttyS1,115200n8 {memory_args} init=/init "
 			"rootfstype=squashfs root=/dev/mtdblock2 rw "
-			"mtdparts=sfc0_nor:256k(boot),2560k(kernel),4096k(root),"
-			"9440k(rootfs_data),32k(env)"
+			"mtdparts=sfc0_nor:256k(boot),2560k(kernel),12288k(root),"
+			"1248k(rootfs_data),32k(env)"
 		),
 		"stdin": "serial",
 		"stdout": "serial",
@@ -81,7 +81,7 @@ def main() -> None:
 	parser.add_argument("--uboot", type=Path, required=True)
 	parser.add_argument("--kernel", type=Path, required=True)
 	parser.add_argument("--rootfs", type=Path, required=True)
-	parser.add_argument("--memory-args", default="mem=96M@0x0 rmem=32M@0x6000000")
+	parser.add_argument("--memory-args", default="mem=96M@0x0 rmem=32M@0x6000000 cma=16M")
 	parser.add_argument("--output", type=Path, required=True)
 	args = parser.parse_args()
 	try:

@@ -17,7 +17,13 @@ fi
 chmod 600 "${TARGET_DIR}/etc/shadow"
 
 # The OpenIPC donation notice is not shown on Lumi products.
-rm -f "${TARGET_DIR}/etc/openipc_donors"
+rm -f "${TARGET_DIR}/etc/openipc_donors" "${TARGET_DIR}/etc/openipc_banner" "${TARGET_DIR}/etc/hostname.auto"
+
+# Bake the identity into the read-only rootfs; startup only sets the kernel name.
+printf 'lumi\n' > "${TARGET_DIR}/etc/hostname"
+printf 'Welcome to Lumi\n' > "${TARGET_DIR}/etc/issue"
+sed -i '/^127\.0\.1\.1/d' "${TARGET_DIR}/etc/hosts"
+printf '127.0.1.1\tlumi\n' >> "${TARGET_DIR}/etc/hosts"
 
 # OS identity. GENERAL already wrote OPENIPC_VERSION/BUILD_* (kept for the
 # tools that read them); prepend the standard os-release fields for Lumi.

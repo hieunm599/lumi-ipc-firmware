@@ -1,3 +1,9 @@
 CONFIG_BLK_DEV_INITRD=y
 CONFIG_RD_GZIP=y
 CONFIG_I2C_CHARDEV=y
+# This Wi-Fi board uses PB6-PB11/PB13-PB14 for the ULN motor inputs.
+# GMAC_PORTB overlaps them; do not reserve or mux these pins for Ethernet.
+# CONFIG_JZ_MAC is not set
+CONFIG_CMA=y
+CONFIG_CMA_SIZE_MBYTES=16
+CONFIG_IPV6=y

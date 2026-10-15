@@ -1,191 +1,125 @@
 #!/bin/sh
+# Model configuration owns module startup. IMP starts at most once per boot.
+set -eu
+umask 077
+NAME=lumi-ipc-streamer
+BIN=/lumi/bin
+PROFILE=/lumi/camera-profile.json
+PIDFILE=/var/run/lumi-ipc-streamer.pid
+LOCK=/var/run/lumi-ipc-streamer.init-lock
+READY=/tmp/lumi-supervisor.ready
+STARTED=/tmp/lumi-runtime.started
+RELAY_INIT=$BIN/lumi-t33gs-relay-agent
 
-NAME="lumi-ipc-streamer"
-INSTALL_DIR="/overlay/$NAME"
-BIN_DIR="$INSTALL_DIR/bin"
-SUPERVISOR="$BIN_DIR/ipc-stream-supervisor"
-PIDFILE="/var/run/$NAME.pid"
-LOCKDIR="/var/run/$NAME.init-lock"
-RUNTIME_DIR="/tmp/$NAME"
-P2P_INIT="/overlay/$NAME/bin/lumi-t33gs-p2p"
-P2P_CONFIG="/overlay/$NAME/p2p.conf"
-RELAY_INIT="/overlay/$NAME/bin/lumi-t33gs-relay-agent"
-RELAY_CONFIG="/overlay/$NAME/relay-agent.env"
-RELAY_KEY="/overlay/$NAME/relay-key.json"
-
-acquire_lock() {
-	mkdir -p /var/run || return 1
-	tries=0
-	while ! mkdir "$LOCKDIR" 2>/dev/null; do
-		lock_pid=$(cat "$LOCKDIR/pid" 2>/dev/null || true)
-		if [ -n "$lock_pid" ] && ! kill -0 "$lock_pid" 2>/dev/null; then
-			stale_lock="$LOCKDIR.stale.$$"
-			if mv "$LOCKDIR" "$stale_lock" 2>/dev/null; then
-				rm -f "$stale_lock/pid"
-				rmdir "$stale_lock" 2>/dev/null || true
-				continue
-			fi
-		fi
-		[ "$tries" -lt 60 ] || {
-			echo "Starting $NAME: FAIL (init lock busy)"
-			return 1
-		}
-		tries=$((tries + 1))
-		sleep 1
-	done
-	echo "$$" >"$LOCKDIR/pid"
+lock() {
+ mkdir -p /var/run
+ tries=0
+ while ! mkdir "$LOCK" 2>/dev/null; do
+  owner=$(cat "$LOCK/pid" 2>/dev/null || true)
+  if [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; then
+   rm -f "$LOCK/pid"; rmdir "$LOCK" 2>/dev/null || true
+  fi
+  [ "$tries" -lt 60 ] || return 1
+  tries=$((tries + 1)); sleep 1
+ done
+ echo "$$" > "$LOCK/pid"
+ trap 'rm -f "$LOCK/pid"; rmdir "$LOCK" 2>/dev/null || true' EXIT
 }
-
-release_lock() {
-	[ "$(cat "$LOCKDIR/pid" 2>/dev/null)" = "$$" ] || return 0
-	rm -f "$LOCKDIR/pid"
-	rmdir "$LOCKDIR" 2>/dev/null || true
-}
-
+running() { [ -s "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; }
 start() {
-	if [ -s "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
-		echo "Starting $NAME: already running (PID $(cat "$PIDFILE"))"
-		return 0
-	fi
-	[ -x "$SUPERVISOR" ] || {
-		echo "Starting $NAME: skipped (install package under $INSTALL_DIR)"
-		return 0
-	}
-
-	[ -d /overlay ] && mountpoint -q /overlay || {
-		echo "Starting $NAME: FAIL (/overlay is not mounted)"
-		return 1
-	}
-
-	tries=0
-	wlan_ip=""
-	while [ "$tries" -lt 30 ]; do
-		wlan_ip=$(ip -4 -o addr show dev wlan0 2>/dev/null | awk '{split($4, a, "/"); print a[1]; exit}')
-		[ -n "$wlan_ip" ] && break
-		tries=$((tries + 1))
-		sleep 1
-	done
-	[ -n "$wlan_ip" ] || {
-		echo "Starting $NAME: FAIL (wlan0 has no IPv4 address)"
-		return 1
-	}
-
-	sd_mount=$(awk '($2 == "/mnt" || $2 ~ /^\/mnt\//) && $1 ~ /^\/dev\/(mmcblk|sd)/ { print $2; exit }' /proc/mounts)
-	if [ -n "$sd_mount" ]; then
-		export LUMI_RECORDING_DIR="$sd_mount/$NAME/recordings"
-		recorder_bin="$sd_mount/$NAME/recording/bin/ipc-stream-recorder"
-		if [ -x "$recorder_bin" ]; then
-			export LUMI_RECORDER_BIN="$recorder_bin"
-		else
-			unset LUMI_RECORDER_BIN
-		fi
-	else
-		export LUMI_RECORDING_DIR="/mnt/.${NAME}-no-card"
-		unset LUMI_RECORDER_BIN
-	fi
-
-	mkdir -p "$RUNTIME_DIR" /var/run || return 1
-	rm -f "$RUNTIME_DIR/supervisor.ready"
-	export LUMI_RUNTIME_DIR="$RUNTIME_DIR"
-	export LUMI_CONFIG_PATH="$INSTALL_DIR/config.json"
-	export LUMI_HTTP_ADDR="127.0.0.1:18080"
-	export LUMI_RTSP_ADDR="$wlan_ip:18554"
-	# The 640x360 secondary path has passed concurrent board validation. It is
-	# allocated only when a client leases /second, so idle memory use is unchanged.
-	export T33GS_SECOND_STREAM=1
-	# The board-validated JPEG-VENC snapshot path is available by default;
-	# set T33GS_SNAPSHOT=0 only to disable it explicitly.
-	unset T33GS_SNAPSHOT
-	# These controls are board-validated. Audio remains off in config by default;
-	# the gate only allows an explicit API config change to start microphone DMA.
-	export T33GS_ISP_TUNING=1
-	export T33GS_AUDIO_CAPTURE=1
-	# OSD remains off unless root explicitly provisions osd.conf on the
-	# writable overlay. Accept one literal setting rather than sourcing shell.
-	unset T33GS_OSD
-	if [ -f "$INSTALL_DIR/osd.conf" ]; then
-		osd_meta=$(stat -c '%u:%a' "$INSTALL_DIR/osd.conf" 2>/dev/null || true)
-		if [ "$osd_meta" = "0:600" ]; then
-			osd_mode=$(cat "$INSTALL_DIR/osd.conf" 2>/dev/null || true)
-			case "$osd_mode" in
-				enabled) export T33GS_OSD=1 ;;
-				disabled) ;;
-				*) echo "Starting $NAME: ignoring invalid osd.conf" >>"/tmp/$NAME.log" ;;
-			esac
-		else
-			echo "Starting $NAME: ignoring osd.conf unless owner/mode is root:0600" >>"/tmp/$NAME.log"
-		fi
-	fi
-	"$SUPERVISOR" >"/tmp/$NAME.log" 2>&1 &
-	pid=$!
-	echo "$pid" >"$PIDFILE"
-	tries=0
-	while [ "$tries" -lt 10 ]; do
-		if [ -f "$RUNTIME_DIR/supervisor.ready" ] && kill -0 "$pid" 2>/dev/null; then
-			if [ -x "$P2P_INIT" ] && [ -s "$P2P_CONFIG" ]; then
-				"$P2P_INIT" start >>"/tmp/$NAME.log" 2>&1 || echo "Starting T33gs P2P: FAIL (see /tmp/lumi-t33gs-p2p.log)" >>"/tmp/$NAME.log"
-			fi
-			if [ -x "$RELAY_INIT" ] && [ -s "$RELAY_CONFIG" ] && [ -s "$RELAY_KEY" ] && { [ ! -x "$P2P_INIT" ] || "$P2P_INIT" status >/dev/null 2>&1; }; then
-				"$RELAY_INIT" start >>"/tmp/$NAME.log" 2>&1 || echo "Starting T33gs relay-agent: FAIL (see /tmp/lumi-t33gs-relay-agent.log)" >>"/tmp/$NAME.log"
-			fi
-			echo "Starting $NAME: ready (PID $pid), RTSP $LUMI_RTSP_ADDR"
-			return 0
-		fi
-		if ! kill -0 "$pid" 2>/dev/null; then
-			rm -f "$PIDFILE" "$RUNTIME_DIR/supervisor.ready"
-			echo "Starting $NAME: FAIL (supervisor exited; see /tmp/$NAME.log)"
-			return 1
-		fi
-		tries=$((tries + 1))
-		sleep 1
-	done
-	kill -INT "$pid" 2>/dev/null
-	tries=0
-	while kill -0 "$pid" 2>/dev/null && [ "$tries" -lt 5 ]; do
-		sleep 1
-		tries=$((tries + 1))
-	done
-	kill -0 "$pid" 2>/dev/null && kill "$pid" 2>/dev/null
-	rm -f "$PIDFILE" "$RUNTIME_DIR/supervisor.ready"
-	echo "Starting $NAME: FAIL (readiness timeout; see /tmp/$NAME.log)"
-	return 1
+ if running; then echo 'Lumi runtime already running'; return 0; fi
+ if [ -e "$STARTED" ]; then echo 'Lumi runtime requires reboot before reopening IMP' >&2; return 1; fi
+ [ -x "$BIN/ipc-stream-supervisor" ] && [ -x "$BIN/lumi-config" ]
+ mountpoint -q /overlay
+ tries=0; wlan_ip=''
+ while [ "$tries" -lt 30 ]; do
+  wlan_ip=$(ip -4 -o addr show dev wlan0 2>/dev/null | awk '{split($4,a,"/"); print a[1]; exit}')
+  [ -n "$wlan_ip" ] && break
+  tries=$((tries + 1)); sleep 1
+ done
+ [ -n "$wlan_ip" ] || { echo 'Lumi runtime: Wi-Fi IPv4 unavailable' >&2; return 1; }
+ # Also latch failed trials/config preparation: watchdog must not retry a
+ # partially mounted candidate or rejected configuration during this boot.
+ cat /proc/sys/kernel/random/boot_id > "$STARTED"
+ config_root=$($BIN/lumi-config dev-wait "$PROFILE" /overlay /tmp)
+ $BIN/lumi-config init "$PROFILE" "$config_root" /tmp
+ set -a
+ . /tmp/lumi-boot.env
+ set +a
+ # Owner-selected PRJ008 image profile, qualified by bounded .100 trials.
+ # Keep OEM bins/neutral image controls; apply only the selected ISP overrides.
+ export T33GS_ISP_TUNING=0 T33GS_ISP_MAX_EXPOSURE_LINES=909
+ export T33GS_ISP_TRIAL_SHARPNESS=140 T33GS_ISP_NR_TRIAL=1
+ export T33GS_ISP_SINTER_RATIO=112 T33GS_ISP_TEMPER_RATIO=128
+ export LUMI_HTTP_ADDR=0.0.0.0:18080
+ # Keep listener valid through DHCP changes without reopening the camera owner.
+ export LUMI_RTSP_ADDR=0.0.0.0:18554
+ # Preserve the separately provisioned voice pilot without embedding secrets.
+ voice=/overlay/lumi-voice
+ if [ -f "$voice/ENABLED" ] && [ -f "$voice/READY" ]; then
+  [ "$(stat -c '%u:%a' "$voice")" = 0:700 ] && [ ! -L "$voice" ]
+  [ "$(cat "$voice/ENABLED")" = cpu16k-v1 ]
+  mkdir -p /tmp/lumi-voice
+  chmod 700 /tmp/lumi-voice
+  for name in ENABLED READY model.tflite webrtc_profile.ini luvox.conf; do
+   [ -f "$voice/$name" ] && [ ! -L "$voice/$name" ]
+   [ "$(stat -c '%u:%a' "$voice/$name")" = 0:600 ]
+   cp "$voice/$name" "/tmp/lumi-voice/$name"
+   chmod 600 "/tmp/lumi-voice/$name"
+  done
+  export LUMI_MODULE_VOICE=1 LUMI_VOICE_BIN=$BIN/ipc-voice-worker
+  export LUMI_VOICE_DIR=/tmp/lumi-voice LUMI_VOICE_MODEL=/tmp/lumi-voice/model.tflite
+  export LUMI_VOICE_CONFIG=/tmp/lumi-voice/luvox.conf
+ fi
+ unset LUMI_RECORDER_BIN
+ export LUMI_MODULE_RECORDING=0
+ sd_mount=$(awk '($2 == "/mnt" || $2 ~ /^\/mnt\//) && $1 ~ /^\/dev\/(mmcblk|sd)/ {print $2; exit}' /proc/mounts)
+ if [ -n "$sd_mount" ]; then
+  if [ -d "$sd_mount/lumi-ipc-streamer/recordings" ]; then
+   export LUMI_RECORDING_DIR="$sd_mount/lumi-ipc-streamer/recordings"
+  else
+   export LUMI_RECORDING_DIR="$sd_mount/lumi/recordings"
+  fi
+  if [ -e /tmp/lumi-dev-active.json ]; then export LUMI_RECORDING_DIR="$sd_mount/lumi-dev-recordings"; fi
+  export LUMI_RECORDER_BIN=$BIN/ipc-stream-recorder
+  export LUMI_MODULE_RECORDING=1
+ else
+  export LUMI_RECORDING_DIR=/mnt/.lumi-no-card
+ fi
+ if [ "$LUMI_MODULE_PTZ" = 1 ]; then
+  [ -c /dev/motor ] || insmod /lib/modules/3.10.14/ingenic/lumi_motor.ko
+  chmod 600 /dev/motor
+ fi
+ rm -f "$READY"
+ "$BIN/ipc-stream-supervisor" >> /tmp/lumi-streamer.log 2>&1 &
+ pid=$!; echo "$pid" > "$PIDFILE"
+ tries=0
+ while [ "$tries" -lt 30 ]; do
+  if [ -f "$READY" ] && kill -0 "$pid" 2>/dev/null; then
+   if [ "$LUMI_MODULE_RELAY" = 1 ]; then
+    if [ -s "$LUMI_RELAY_KEY" ]; then "$RELAY_INIT" start >> /tmp/lumi-relay.log 2>&1 || echo 'Lumi relay startup failed' >&2
+    else echo 'Lumi relay waiting for device identity'; fi
+   fi
+   echo 'Lumi runtime ready'; return 0
+  fi
+  kill -0 "$pid" 2>/dev/null || break
+  tries=$((tries + 1)); sleep 1
+ done
+ echo 'Lumi runtime failed; inspect /tmp/lumi-streamer.log; reboot required' >&2
+ return 1
 }
-
 stop() {
-	if [ -x "$RELAY_INIT" ]; then
-		"$RELAY_INIT" stop >>"/tmp/$NAME.log" 2>&1 || true
-	fi
-	if [ -x "$P2P_INIT" ]; then
-		"$P2P_INIT" stop >>"/tmp/$NAME.log" 2>&1 || true
-	fi
-	[ -s "$PIDFILE" ] || return 0
-	pid=$(cat "$PIDFILE")
-	if kill -0 "$pid" 2>/dev/null; then
-		kill -INT "$pid"
-		tries=0
-		while kill -0 "$pid" 2>/dev/null && [ "$tries" -lt 10 ]; do
-			sleep 1
-			tries=$((tries + 1))
-		done
-		kill -0 "$pid" 2>/dev/null && kill "$pid" 2>/dev/null
-	fi
-	rm -f "$PIDFILE" "$RUNTIME_DIR/supervisor.ready"
-	echo "Stopping $NAME: OK"
+ "$RELAY_INIT" stop || true
+ if running; then
+  pid=$(cat "$PIDFILE"); kill -TERM "$pid"
+  tries=0
+  while kill -0 "$pid" 2>/dev/null && [ "$tries" -lt 10 ]; do sleep 1; tries=$((tries + 1)); done
+  kill -0 "$pid" 2>/dev/null && kill -TERM "$pid" 2>/dev/null || true
+ fi
+ rm -f "$PIDFILE" "$READY"
 }
-
-case "$1" in
-	start|stop)
-		acquire_lock || exit 1
-		trap 'release_lock' EXIT
-		trap 'exit 1' HUP INT TERM
-		"$1"
-		;;
-	restart|reload)
-		acquire_lock || exit 1
-		trap 'release_lock' EXIT
-		trap 'exit 1' HUP INT TERM
-		stop
-		start
-		;;
-	*) echo "Usage: $0 {start|stop|restart|reload}" >&2; exit 1 ;;
+case "${1:-}" in
+ start|stop) lock; "$1" ;;
+ restart|reload) echo 'Reboot required to apply runtime module changes' >&2; exit 1 ;;
+ *) echo "Usage: $0 {start|stop}" >&2; exit 64 ;;
 esac

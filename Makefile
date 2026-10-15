@@ -55,7 +55,7 @@ br-%: defconfig
 
 defconfig: prepare
 	@echo --- $(or $(CONFIG),$(error variable BOARD not found))
-	@cat $(CONFIG) $(PWD)/general/openipc.fragment > $(BR_CONF)
+	@cat $(CONFIG) $(PWD)/general/openipc.fragment $(if $(filter lumi/%,$(CONFIG)),$(PWD)/lumi/lumi.fragment) > $(BR_CONF)
 	@grep -sE '^(BR2_GLOBAL_PATCH_DIR|BR2_ROOTFS_OVERLAY|BR2_ROOTFS_POST_BUILD_SCRIPT)=' $(CONFIG) >> $(BR_CONF) || true
 	@$(BR_MAKE) BR2_DEFCONFIG=$(BR_CONF) defconfig
 
