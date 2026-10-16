@@ -23,8 +23,10 @@ rootfs-only `br-all` build. Include the matched source-built relay and its publi
 certificate when the product enables relay. Voice credentials/model/profile are
 separately provisioned under root-owned mode-0700 `/overlay/lumi-voice`, with
 mode-0600 `ENABLED`, `READY`, `model.tflite`, `webrtc_profile.ini`, `luvox.conf`.
-`ENABLED` retains `cpu16k-v1`. S60 copies this private state to RAM before core
-starts; the main supervisor owns combined voice restart. None of those private
+`ENABLED` retains `cpu16k-v1`. S60 copies the model/AEC state to RAM before core
+starts and passes `/overlay/lumi-voice/luvox.conf` directly to voice for per-session
+configuration reload. An optional private `luvox-init.json` stays in overlay and
+is referenced by `LUVOX_INIT_FILE`; the main supervisor owns combined voice restart. None of those private
 files belongs in the firmware. Without a mounted card, recorder stays disabled.
 
 For a camera already on the 12 MiB root layout, a rootfs-only update preserves

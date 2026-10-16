@@ -69,7 +69,7 @@ start() {
   done
   export LUMI_MODULE_VOICE=1 LUMI_VOICE_BIN=$BIN/ipc-voice-worker
   export LUMI_VOICE_DIR=/tmp/lumi-voice LUMI_VOICE_MODEL=/tmp/lumi-voice/model.tflite
-  export LUMI_VOICE_CONFIG=/tmp/lumi-voice/luvox.conf
+  export LUMI_VOICE_CONFIG=$voice/luvox.conf
  fi
  unset LUMI_RECORDER_BIN
  export LUMI_MODULE_RECORDING=0
