@@ -11,6 +11,14 @@ operation and alternate ISP features remain unverified.
 
 ## Build
 
+The current T33gs kernel release is `4.4.94-lumi-t33gs`. Build its kernel and
+matching modules with `contrib/build-t33gs-k4494.sh --all`, then assemble them
+with a checksum-verified 4.4.94 rootfs baseline using
+`contrib/assemble-t33gs-k4494.py`. The [4.4.94 runbook](https://github.com/rd-lumi-software/lumi-ipc-streamer/blob/main/harness-docs/runbooks/t33gs-kernel-4494.md)
+lists the SDK/toolchain inputs, verification and recovery boundary. A build is a
+candidate until board checks pass. The old Buildroot board configuration is
+retired from the current build path.
+
 Compact runtime builds after 2026-10-11 install core, integrated HTTP/RTSP/P2P
 gateway and a POSIX supervisor; recorder and combined voice worker are optional.
 The image hook removes the old RTSP, motor, P2P and two voice executables, and the
@@ -18,26 +26,29 @@ boot scripts no longer launch/watch standalone P2P. Keep the external relay
 connector when configured. Historical process descriptions below refer to the
 earlier image.
 
-Use a verified `make package-t33gs` directory as `T33_RUNTIME_DIR` for a cached
-rootfs-only `br-all` build. Include the matched source-built relay and its public
-certificate when the product enables relay. Voice credentials/model/profile are
+Voice credentials/model/profile are
 separately provisioned under root-owned mode-0700 `/overlay/lumi-voice`, with
-mode-0600 `ENABLED`, `READY`, `model.tflite`, `webrtc_profile.ini`, `luvox.conf`.
+mode-0600 `ENABLED`, `READY`, `model.tflite`, `webrtc_profile.ini`, `voice.conf`.
 `ENABLED` retains `cpu16k-v1`. S60 copies the model/AEC state to RAM before core
-starts and passes `/overlay/lumi-voice/luvox.conf` directly to voice for per-session
-configuration reload. An optional private `luvox-init.json` stays in overlay and
+starts. S60 checks and sources `/overlay/lumi-voice/voice.conf` (shell export
+assignments), then validates the inherited settings using the voice worker's
+safe `--check-config` before starting the supervisor/core. Each process reads
+its own environment through clap; changes require a reboot on T33. Provision
+`tools/voice-runtime/config/voice.conf.example` from the streamer repository
+with this device's secret. An optional private `luvox-init.json` stays in overlay and
 is referenced by `LUVOX_INIT_FILE`; the main supervisor owns combined voice restart. None of those private
 files belongs in the firmware. Without a mounted card, recorder stays disabled.
 
-For a camera already on the 12 MiB root layout, a rootfs-only update preserves
-kernel, bootloader, environment and `/overlay`; verify its partition map first.
-Set `T33_KERNEL_MODULES_DIR` to the `lib/modules` tree from the byte-verified
-prior image when preserving the running kernel's exact module set. Do not use
-this input for a kernel-changing build or an unverified SDK cache.
-Image build is not flash authorization or board qualification.
+The 4.4.94 assembler takes a byte-verified 4.4.94 rootfs baseline; it does not
+compile userspace. A release with new userspace must first produce and verify a
+matching rootfs baseline. Image build is not flash authorization or board
+qualification.
 
-Set `T33_SDK_ROOT` to the extracted Tassadar T32/T33 SDK directory and run
-`contrib/build-t33.sh`. The build requires `7z` and `lzop`. It creates an
+## Historical board bring-up
+
+The former board bring-up path has been removed from the active source tree.
+Its measurements remain in [peripherals.md](peripherals.md) and the streamer
+evidence records. The former build created an
 OpenIPC musl rootfs and kernel, then uses the SDK GCC 5.4 uClibc toolchain to
 build the TX-ISP and SC4336 modules. The SDK ISP archive and media libraries
 are copied only into the ignored output directory and the generated test
@@ -178,7 +189,7 @@ secondary profiles are not.
 
 ## Integrated firmware — 2026-10-08
 
-`contrib/build-t33.sh` now builds `package-t33gs-p2p-runtime` from the sibling
+The historical image bundled `package-t33gs-p2p-runtime` from the sibling
 streamer checkout and installs its verified package into
 `/usr/lib/lumi-ipc-streamer` in SquashFS. Device configuration remains under
 `/overlay/lumi-ipc-streamer`; binaries are not copied into JFFS2 at startup.
@@ -187,11 +198,8 @@ snapshot decoder, recorder, WebRTC worker and the compressed relay-agent.
 The matching native motor module is compiled from sibling `lumi-ipc-linux`.
 No relay identity key is embedded.
 
-For a rootfs-only build with an already built source package, set
-`T33_RUNTIME_DIR=/absolute/path/to/package-t33gs-p2p-runtime` before
-`make BOARD=lumi_t33gs_prj008_nor16 TARGET=/absolute/output br-all`.
-The post-build hook rejects missing executables, mismatched package checksums
-and packaged relay identity keys. It records a manifest of the installed bytes.
+The former post-build hook checked executables, package checksums and packaged
+relay identity keys. The current 4.4.94 assembly path is described above.
 
 This replaces the old 4 MiB root/9.2 MiB runtime layout:
 

@@ -1,0 +1,50 @@
+#!/bin/sh
+# Nonpersistent qualification boot. Do not run the flash image's /init or rcS.
+set -eu
+export PATH=/bin
+mount -t devtmpfs devtmpfs /dev
+mkdir -p /dev/pts /dev/shm
+mount -t devpts -o gid=5,mode=620,ptmxmode=0666 devpts /dev/pts
+mount -t tmpfs -o mode=1777 tmpfs /dev/shm
+exec </dev/console >/dev/console 2>&1
+rescue() {
+    echo 'RAM trial stopped; persistent startup has not been invoked.'
+    while :; do /bin/sh; done
+}
+trap rescue EXIT
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+. /candidate/rootfs.env
+grep -q '^mtd2: 00c00000 .* "root"$' /proc/mtd
+actual=$(dd if=/dev/mtdblock2 bs=4096 count="$ROOTFS_BLOCKS" 2>/dev/null | sha256sum)
+[ "${actual%% *}" = "$ROOTFS_SHA256" ]
+mount -t tmpfs tmpfs /rw
+mkdir -p /rw/upper /rw/work
+mount -t squashfs -o ro /dev/mtdblock2 /lower
+mount -t overlay overlay -o lowerdir=/lower,upperdir=/rw/upper,workdir=/rw/work /newroot
+cp -a /candidate/lib/modules/4.4.94-lumi-t33gs /newroot/lib/modules/
+cp -a /candidate/etc/init.d/S35board /newroot/etc/init.d/S35board
+cp -a /candidate/etc/init.d/S60lumi-streamer /newroot/etc/init.d/S60lumi-streamer
+rm -rf /candidate/lib /candidate/etc
+mount -t tmpfs -o mode=1777 tmpfs /newroot/tmp
+mount -t tmpfs tmpfs /newroot/run
+mount -t tmpfs tmpfs /newroot/overlay
+mkdir -p /newroot/run/lock /newroot/run/lumi-upper
+mount -o move /lower /newroot/rom
+mount -o move /rw /newroot/run/lumi-upper
+mount -o move /sys /newroot/sys
+mount -o move /proc /newroot/proc
+mount -o move /dev /newroot/dev
+cat > /newroot/run/lumi-trial-init <<'EOF'
+#!/bin/sh
+export PATH=/sbin:/bin:/usr/sbin:/usr/bin
+exec </dev/console >/dev/console 2>&1
+echo 'T33gs 4.4.94 RAM trial: /overlay is tmpfs; services are stopped.'
+echo 'Do not run /init, rcS, sysupgrade or flash/environment write commands.'
+echo 'Inspect hardware first; start selected services only with RAM configuration.'
+while :; do /bin/sh; done
+EOF
+chmod 700 /newroot/run/lumi-trial-init
+# Baseline BusyBox has chroot, but intentionally omits switch_root. Keep the
+# small bootstrap resident; the immutable baseline rootfs is read from flash.
+exec chroot /newroot /run/lumi-trial-init

@@ -37,6 +37,14 @@ prepare_hostkey() {
 }
 
 start() {
+ [ -f /var/run/lumi-firewall.ready ] || { echo 'SSH refused: firewall not ready' >&2; return 1; }
+ if [ -e /overlay/lumi-admin/ssh-key-only ] || [ -L /overlay/lumi-admin/ssh-key-only ]; then
+  [ -f /overlay/lumi-admin/ssh-key-only ] && [ ! -L /overlay/lumi-admin/ssh-key-only ] || return 1
+  [ "$(stat -c '%u:%a' /overlay/lumi-admin/ssh-key-only)" = 0:600 ] || return 1
+  [ "$(cat /overlay/lumi-admin/ssh-key-only)" = key-only-v1 ] || return 1
+  [ -s /overlay/dropbear/authorized_keys ] || { echo 'SSH keys missing; refusing password fallback' >&2; return 1; }
+  DAEMON_ARGS="$DAEMON_ARGS -s"
+ fi
 	echo -n "Starting $DAEMON: "
 	prepare_hostkey || { echo "FAIL (host key storage unavailable)"; return 1; }
 	umask 077

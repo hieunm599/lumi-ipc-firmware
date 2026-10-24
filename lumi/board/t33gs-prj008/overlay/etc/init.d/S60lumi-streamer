@@ -42,6 +42,13 @@ start() {
  # partially mounted candidate or rejected configuration during this boot.
  cat /proc/sys/kernel/random/boot_id > "$STARTED"
  config_root=$($BIN/lumi-config dev-wait "$PROFILE" /overlay /tmp)
+ # Once migrated, live runtime config owns boot defaults; root snapshot is recovery only.
+ if [ "$config_root" = /overlay ] && [ -f /overlay/lumi-gateway/config.json ]; then
+  [ ! -L /overlay/lumi-gateway ] && [ ! -L /overlay/lumi-gateway/config.json ]
+  [ ! -L /overlay/config.json ]
+  cp /overlay/lumi-gateway/config.json /overlay/config.json
+  chown 0:0 /overlay/config.json; chmod 600 /overlay/config.json
+ fi
  $BIN/lumi-config init "$PROFILE" "$config_root" /tmp
  set -a
  . /tmp/lumi-boot.env
@@ -51,7 +58,7 @@ start() {
  export T33GS_ISP_TUNING=0 T33GS_ISP_MAX_EXPOSURE_LINES=909
  export T33GS_ISP_TRIAL_SHARPNESS=140 T33GS_ISP_NR_TRIAL=1
  export T33GS_ISP_SINTER_RATIO=112 T33GS_ISP_TEMPER_RATIO=128
- export LUMI_HTTP_ADDR=0.0.0.0:18080
+ export LUMI_HTTP_ADDR=127.0.0.1:18080
  # Keep listener valid through DHCP changes without reopening the camera owner.
  export LUMI_RTSP_ADDR=0.0.0.0:18554
  # Preserve the separately provisioned voice pilot without embedding secrets.
@@ -59,9 +66,19 @@ start() {
  if [ -f "$voice/ENABLED" ] && [ -f "$voice/READY" ]; then
   [ "$(stat -c '%u:%a' "$voice")" = 0:700 ] && [ ! -L "$voice" ]
   [ "$(cat "$voice/ENABLED")" = cpu16k-v1 ]
+  if [ ! -f "$voice/voice.conf" ] || [ -L "$voice/voice.conf" ] ||
+     [ "$(stat -c '%u:%a' "$voice/voice.conf")" != 0:600 ]; then
+   echo 'Lumi voice: voice.conf must be a root-owned regular mode-0600 file' >&2
+   return 1
+  fi
+  sh -n "$voice/voice.conf" >/dev/null 2>&1 || {
+   echo 'Lumi voice: invalid shell syntax in voice.conf' >&2; return 1;
+  }
+  . "$voice/voice.conf"
+  "$BIN/ipc-voice-worker" --check-config >/dev/null || return 1
   mkdir -p /tmp/lumi-voice
   chmod 700 /tmp/lumi-voice
-  for name in ENABLED READY model.tflite webrtc_profile.ini luvox.conf; do
+  for name in ENABLED READY model.tflite webrtc_profile.ini; do
    [ -f "$voice/$name" ] && [ ! -L "$voice/$name" ]
    [ "$(stat -c '%u:%a' "$voice/$name")" = 0:600 ]
    cp "$voice/$name" "/tmp/lumi-voice/$name"
@@ -69,27 +86,24 @@ start() {
   done
   export LUMI_MODULE_VOICE=1 LUMI_VOICE_BIN=$BIN/ipc-voice-worker
   export LUMI_VOICE_DIR=/tmp/lumi-voice LUMI_VOICE_MODEL=/tmp/lumi-voice/model.tflite
-  export LUMI_VOICE_CONFIG=$voice/luvox.conf
  fi
+ # Keep the lightweight recorder alive without a card: it owns hotplug/format.
  unset LUMI_RECORDER_BIN
  export LUMI_MODULE_RECORDING=0
- sd_mount=$(awk '($2 == "/mnt" || $2 ~ /^\/mnt\//) && $1 ~ /^\/dev\/(mmcblk|sd)/ {print $2; exit}' /proc/mounts)
- if [ -n "$sd_mount" ]; then
-  if [ -d "$sd_mount/lumi-ipc-streamer/recordings" ]; then
-   export LUMI_RECORDING_DIR="$sd_mount/lumi-ipc-streamer/recordings"
-  else
-   export LUMI_RECORDING_DIR="$sd_mount/lumi/recordings"
-  fi
-  if [ -e /tmp/lumi-dev-active.json ]; then export LUMI_RECORDING_DIR="$sd_mount/lumi-dev-recordings"; fi
-  export LUMI_RECORDER_BIN=$BIN/ipc-stream-recorder
-  export LUMI_MODULE_RECORDING=1
- else
-  export LUMI_RECORDING_DIR=/mnt/.lumi-no-card
+ sd_mount=$(awk '($2 == "/mnt/mmcblk0p1" || $2 == "/mnt/mmcblk0") && $1 ~ /^\/dev\/mmcblk0(p1)?$/ {print $2; exit}' /proc/mounts)
+ export LUMI_RECORDING_DIR="${sd_mount:-/mnt/mmcblk0p1}/lumi/recordings"
+ if [ -e /tmp/lumi-dev-active.json ]; then export LUMI_RECORDING_DIR="${sd_mount:-/mnt/mmcblk0p1}/lumi-dev-recordings"; fi
+ if [ -x "$BIN/ipc-stream-recorder" ]; then
+  export LUMI_RECORDER_BIN=$BIN/ipc-stream-recorder LUMI_MODULE_RECORDING=1
  fi
  if [ "$LUMI_MODULE_PTZ" = 1 ]; then
-  [ -c /dev/motor ] || insmod /lib/modules/3.10.14/ingenic/lumi_motor.ko
+  [ -c /dev/motor ] || insmod "/lib/modules/$(uname -r)/ingenic/lumi_motor.ko"
   chmod 600 /dev/motor
  fi
+ [ -f /var/run/lumi-firewall.ready ] || { echo 'Lumi firewall not ready' >&2; return 1; }
+ "$BIN/lumi-gateway-permissions" > /tmp/lumi-gateway.env
+ . /tmp/lumi-gateway.env
+ export LUMI_CONFIG_PATH
  rm -f "$READY"
  "$BIN/ipc-stream-supervisor" >> /tmp/lumi-streamer.log 2>&1 &
  pid=$!; echo "$pid" > "$PIDFILE"

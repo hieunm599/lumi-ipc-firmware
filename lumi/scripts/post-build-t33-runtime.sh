@@ -5,15 +5,49 @@ target=$1
 : "${T33_RUNTIME_DIR:?Build a verified compact package-t33gs first}"
 runtime=$(realpath "$T33_RUNTIME_DIR")
 destination="$target/lumi"
+# Never reuse an unrelated account/group at the fixed IPC boundary IDs.
+if grep -qE '^[^:]+:[^:]*:200:' "$target/etc/passwd"; then
+ grep -qx 'lumi-gateway:x:200:200:Camera network gateway:/nonexistent:/bin/false' "$target/etc/passwd" || { echo 'Gateway UID 200 collision' >&2; exit 1; }
+else
+ ! grep -q '^lumi-gateway:' "$target/etc/passwd"
+ echo 'lumi-gateway:x:200:200:Camera network gateway:/nonexistent:/bin/false' >> "$target/etc/passwd"
+ echo 'lumi-gateway:!:0:0:99999:7:::' >> "$target/etc/shadow"
+fi
+if grep -qE '^[^:]+:[^:]*:200:' "$target/etc/group"; then
+ grep -qx 'lumi-gateway:x:200:' "$target/etc/group" || { echo 'Gateway GID 200 collision' >&2; exit 1; }
+else
+ ! grep -q '^lumi-gateway:' "$target/etc/group"
+ echo 'lumi-gateway:x:200:' >> "$target/etc/group"
+fi
+# The root SSH authorized_keys and host key share persistent, root-only storage.
+# Never package an administrator identity in the immutable image.
+if [ -d "$target/etc/dropbear" ] && [ ! -L "$target/etc/dropbear" ]; then
+ test -z "$(find "$target/etc/dropbear" -mindepth 1 -print -quit)" || { echo 'Refusing packaged SSH identity' >&2; exit 1; }
+ rmdir "$target/etc/dropbear"
+fi
+ln -sfn /overlay/dropbear "$target/etc/dropbear"
+# This board's accepted filter policy only uses these matches. Other xtables
+# plugins require absent kernel targets (NAT/mangle/etc.) and consume NOR space.
+xtables="$target/usr/lib/xtables"
+test -d "$xtables" && test ! -L "$xtables"
+for plugin in "$xtables"/*; do
+ case "${plugin##*/}" in
+  libxt_conntrack.so|libxt_state.so|libxt_tcp.so|libxt_udp.so|libxt_standard.so|libipt_icmp.so|libip6t_icmp6.so) ;;
+  *) rm -f "$plugin";;
+ esac
+done
+for plugin in libxt_conntrack.so libxt_tcp.so libxt_udp.so libxt_standard.so libipt_icmp.so libip6t_icmp6.so; do
+ test -s "$xtables/$plugin" || { echo "Firewall parser dependency missing: $plugin" >&2; exit 1; }
+done
 # A rootfs-only rollout can retain the deployed kernel's exact module set.
 # The caller supplies a verified prior image, not modules from another kernel.
 if [ -n "${T33_KERNEL_MODULES_DIR:-}" ]; then
- test -s "$T33_KERNEL_MODULES_DIR/3.10.14/ingenic/lumi_motor.ko"
- test -s "$T33_KERNEL_MODULES_DIR/3.10.14/ingenic/tnpu.ko"
+ test -s "$T33_KERNEL_MODULES_DIR/4.4.94-lumi-t33gs/ingenic/lumi_motor.ko"
+ test -s "$T33_KERNEL_MODULES_DIR/4.4.94-lumi-t33gs/ingenic/tnpu.ko"
  rm -rf "$target/lib/modules"
  cp -a "$T33_KERNEL_MODULES_DIR" "$target/lib/modules"
 fi
-required=(ipc-stream-core ipc-stream-services ipc-stream-supervisor lumi-config lumi-snapshot-ffmpeg lumi-t33gs-relay-agent)
+required=(lumi-gateway-permissions install-security ipc-stream-core ipc-stream-services ipc-stream-supervisor lumi-config lumi-snapshot-ffmpeg lumi-t33gs-relay-agent)
 for name in "${required[@]}"; do test -x "$runtime/bin/$name" || { echo "Missing runtime executable: $name" >&2; exit 1; }; done
 test -x "$runtime/recording/bin/ipc-stream-recorder"
 test -s "$runtime/bin/relay-agent.t33gs.gz"

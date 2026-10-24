@@ -1,0 +1,44 @@
+#!/bin/sh
+# No network daemon until both protocol families have an explicit inbound policy.
+set -eu
+umask 077
+case "${1:-start}" in start|restart|reload) ;; *) exit 0;; esac
+rm -f /var/run/lumi-firewall.ready
+# Load persistent policy before SSH/runtime. Never erase or format on failure.
+mkdir -p /overlay
+if ! mountpoint -q /overlay; then
+ mtd_index=$(awk -F '[: ]+' '$4 == "\"rootfs_data\"" { sub(/^mtd/, "", $1); print $1; exit }' /proc/mtd)
+ [ -n "$mtd_index" ]
+ mount -t jffs2 "/dev/mtdblock$mtd_index" /overlay
+fi
+for family in 4 6; do
+ if [ "$family" = 4 ]; then restore=iptables-restore; else restore=ip6tables-restore; fi
+ command -v "$restore" >/dev/null
+ rules=/overlay/lumi-security/firewall$family.rules
+ if [ -f "$rules" ]; then
+  [ ! -L "$rules" ] && [ "$(stat -c '%u:%a' "$rules")" = 0:600 ]
+  "$restore" < "$rules"
+ else
+  # Unprovisioned boards require local UART/admin provisioning, not an open API.
+  if [ "$family" = 4 ]; then
+   icmp='-A INPUT -p icmp -j ACCEPT'
+   dhcp='-A INPUT -p udp --sport 67 --dport 68 -j ACCEPT'
+  else
+   icmp='-A INPUT -p ipv6-icmp -j ACCEPT'
+   dhcp='-A INPUT -p udp --sport 547 --dport 546 -j ACCEPT'
+  fi
+  "$restore" <<RULES
+*filter
+:INPUT DROP [0:0]
+:FORWARD DROP [0:0]
+:OUTPUT ACCEPT [0:0]
+-A INPUT -i lo -j ACCEPT
+-A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+$icmp
+$dhcp
+COMMIT
+RULES
+ fi
+done
+printf 1 > /proc/sys/net/ipv4/tcp_syncookies
+printf ready > /var/run/lumi-firewall.ready

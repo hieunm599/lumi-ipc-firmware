@@ -22,7 +22,7 @@ case "$1" in
 		fi
 
 		# 2. Load Wi-Fi drivers (if present)
-		# kernel-module installs under the full kernel release, not 3.10.14.
+		# Kernel modules are installed under the running kernel release.
 		# This BusyBox build does not provide modinfo.
 		if [ -d "/lib/modules/$(uname -r)/kernel/drivers/net/wireless/aic8800" ]; then
 			modprobe aic_load_fw aic_fw_path=/lib/firmware aicwf_dbg_level=1 2>/dev/null || true
@@ -30,7 +30,7 @@ case "$1" in
 		fi
 
 		# 3. Load TX-ISP module
-		MODULE_DIR=/lib/modules/3.10.14/ingenic
+		MODULE_DIR="/lib/modules/$(uname -r)/ingenic"
 		ISP_MOD="${ISP_MODULE:-tx-isp-${SOC_PROJECT:-PRJ008}.ko}"
 		if [ -f "$MODULE_DIR/$ISP_MOD" ] && ! lsmod | grep -q '^tx_isp'; then
 			insmod "$MODULE_DIR/$ISP_MOD" \

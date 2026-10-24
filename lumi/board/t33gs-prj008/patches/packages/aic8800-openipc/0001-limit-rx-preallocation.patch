@@ -1,0 +1,31 @@
+From: Lumi Camera <lumi@example.invalid>
+Subject: [PATCH] aic_load_fw: bound T33gs USB RX pool to 128 16-KiB buffers
+
+The vendor default reserves 1000 20-KiB RX buffers at module load. Keep
+preallocation enabled for the USB receive path, but limit this board's pool
+to 2 MiB of payload storage. Validate Wi-Fi throughput and pool exhaustion
+on the board before shipping this module.
+
+---
+ aic_load_fw/aicwf_rx_prealloc.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/aic_load_fw/aicwf_rx_prealloc.c b/aic_load_fw/aicwf_rx_prealloc.c
+--- a/aic_load_fw/aicwf_rx_prealloc.c
++++ b/aic_load_fw/aicwf_rx_prealloc.c
+@@ -10,11 +10,11 @@
+ 
+ struct aicwf_rx_buff_list aic_rx_buff_list;
+ 
+-int aic_rxbuff_num_max = 1000;
++int aic_rxbuff_num_max = 128;
+ #ifdef CONFIG_PLATFORM_HI
+ int aic_rxbuff_size = (4 * 512) * 1;
+ #else
+-int aic_rxbuff_size = (4 * 512) * 10;
++int aic_rxbuff_size = 16 * 1024;
+ #endif
+ 
+ int rx_buff_list_ava = 0;
+-- 
+2.43.0

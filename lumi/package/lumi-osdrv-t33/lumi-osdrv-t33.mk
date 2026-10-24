@@ -5,7 +5,7 @@
 ################################################################################
 
 LUMI_OSDRV_T33_VERSION = 1.0.0
-# Sources are staged from the local SDK by contrib/build-t33.sh.
+# Sources must be staged from the matching local SDK before this template package builds.
 LUMI_OSDRV_T33_SOURCE =
 LUMI_OSDRV_T33_DEPENDENCIES = linux
 

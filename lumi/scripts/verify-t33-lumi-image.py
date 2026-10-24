@@ -22,7 +22,7 @@ REQUIRED = ('ipc-stream-core', 'ipc-stream-services',
             'lumi-t33gs-relay-agent', 'utilization',
             'lumi-t33gs-motor-gpio-init')
 
-def check(root):
+def check(root, kernel_release='4.4.94-lumi-t33gs'):
     lumi = root / 'lumi'
     for name in RETIRED:
         if os.path.lexists(lumi / 'bin' / name):
@@ -77,8 +77,9 @@ def check(root):
     for name in ('libimp.so', 'ld-uClibc-0.9.33.2.so'):
         if not (lumi / 'lib' / name).is_file(): raise ValueError(f'missing SDK library: {name}')
     for name in ('lumi_motor.ko', 'tnpu.ko'):
-        data = (root / 'lib/modules/3.10.14/ingenic' / name).read_bytes()
-        if b'vermagic=3.10.14__isvp_goat_1.0__' not in data:
+        data = (root / 'lib/modules' / kernel_release / 'ingenic' / name).read_bytes()
+        vermagic = kernel_release + ' '
+        if ('vermagic=' + vermagic).encode() not in data:
             raise ValueError(f'kernel/module mismatch: {name}')
     # Root login must not retain the removed owner-claim shell.
     if 'openipc-claim' in (root / 'etc/passwd').read_text(): raise ValueError('root shell still uses claim')
@@ -88,9 +89,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('root', type=Path)
     parser.add_argument('--write-manifest', action='store_true')
+    parser.add_argument('--kernel-release', default='4.4.94-lumi-t33gs',
+                        choices=('4.4.94-lumi-t33gs',))
     args = parser.parse_args()
     root = args.root.resolve()
-    profile = check(root)
+    profile = check(root, args.kernel_release)
     files, links = {}, {}
     for path in sorted((root / 'lumi').rglob('*')):
         name = str(path.relative_to(root / 'lumi'))
